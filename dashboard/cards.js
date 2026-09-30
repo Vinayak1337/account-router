@@ -1,5 +1,6 @@
 import { elem } from "./dom.js";
 import { icon } from "./icons.js";
+import { accountDetails } from "./details.js";
 export function accountCards(data, ctx) {
   const {
     name,
@@ -219,40 +220,8 @@ export function accountCards(data, ctx) {
       );
     top.append(badges);
     card.append(top);
-    const meta = elem("div", "account-meta");
-    meta.append(
-      planBadge(a),
-      elem("span", "", `Switch at ${a.policy.switchAtRemainingPercent}%`),
-    );
     identity.append(planBadge(a));
     identity.title = a.profile?.email || a.name;
-    const subscription = a.subscription,
-      until =
-        subscription?.plan === a.profile?.plan
-          ? subscription.activeUntil
-          : null;
-    const expiry = elem(
-      "div",
-      "plan-expiry",
-      a.profile?.plan === "free"
-        ? "Free plan"
-        : until
-          ? `${until * 1000 > Date.now() ? "Plan period ends" : "Reported plan end"} ${fullDate(until)}`
-          : "Plan expiry not reported",
-    );
-    expiry.title = subscription?.checkedAt
-      ? `OpenAI last checked this subscription ${fullDate(subscription.checkedAt)}. Renewal may extend the reported date.`
-      : "OpenAI has not supplied a subscription end date.";
-    const details = elem("details", "account-details");
-    details.dataset.key = "details";
-    details.append(elem("summary", "", "Details"));
-    const detailContent = elem("div", "detail-content");
-    details.append(detailContent);
-    detailContent.append(
-      elem("p", "account-email", a.profile?.email || a.name),
-      meta,
-      expiry,
-    );
     const selectButton = elem(
       "button",
       isNext ? "select-account selected-account" : "select-account",
@@ -349,36 +318,6 @@ export function accountCards(data, ctx) {
     drainButton.addEventListener("click", () => toggleDrain(a.name));
     cardActions.append(selectButton, recurringRow, drainButton);
     card.append(cardActions);
-    const modelUses = a.activeModels?.filter((m) => m.requested) || [];
-    const modelLabels = [
-      ...new Set(
-        modelUses.map(
-          (m) =>
-            (m.fallback ? `${m.requested} → ${m.effective}` : m.effective) +
-            (m.route === "free-sol" ? " · Free priority" : ""),
-        ),
-      ),
-    ];
-    if (modelLabels.length)
-      detailContent.append(
-        elem("p", "model-use", `In use: ${modelLabels.join("; ")}`),
-      );
-    else if (a.lastModelUse)
-      detailContent.append(
-        elem(
-          "p",
-          "model-use",
-          `Last model: ${a.lastModelUse.fallback ? a.lastModelUse.requested + " → " : ""}${a.lastModelUse.effective}`,
-        ),
-      );
-    if (["free", "go"].includes(a.profile?.plan))
-      detailContent.append(
-        elem(
-          "p",
-          "model-policy",
-          "Astra fallback: GPT-6.1 Sol when listed, otherwise GPT-6 Sol. Availability depends on this account’s model access.",
-        ),
-      );
     const entries = Object.entries(a.usage).filter(
       ([, w]) => w && (w.usedPercent !== 0 || w.resetsAt || w.windowMinutes),
     );
@@ -414,89 +353,10 @@ export function accountCards(data, ctx) {
       );
       status.title = drainState.message || drainButton.title;
       card.append(status);
-      detailContent.append(
-        elem(
-          "p",
-          "drain-help",
-          drainState.message ||
-            "Drain uses saved resets automatically only while selected. At 0%, traffic switches away and returns after the reset. Priority stays unchanged.",
-        ),
-      );
     }
-    if (a.credits?.balance !== null && a.credits?.balance !== undefined)
-      detailContent.append(
-        elem(
-          "div",
-          "credits",
-          `Credit balance: ${a.credits.unlimited ? "Unlimited" : new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(a.credits.balance)}`,
-        ),
-      );
-    const resets = a.resets,
-      resetCount = resets?.availableCount ?? a.resetsAvailable;
-    const resetPanel = elem("div", "reset-panel"),
-      resetSummary = elem("div", "reset-summary");
-    resetSummary.title = resets?.updatedAt
-      ? "Reset details checked " + new Date(resets.updatedAt).toLocaleString()
-      : "Use Refresh limits for the latest saved reset details.";
-    resetSummary.append(
-      elem(
-        "strong",
-        "",
-        resetCount === null || resetCount === undefined
-          ? "Saved resets · not reported"
-          : `${resetCount} saved reset${resetCount === 1 ? "" : "s"} available`,
-      ),
+    card.append(
+      accountDetails(a, data, { name, fullDate, ago, usableReset, openReset }),
     );
-    const nearest = resets?.credits
-      ?.filter(usableReset)
-      .sort((x, y) => (x.expiresAt || Infinity) - (y.expiresAt || Infinity))[0];
-    const pending = resets?.pendingCreditId;
-    resetSummary.append(
-      elem(
-        "span",
-        "",
-        pending
-          ? "Previous reset unconfirmed · retry safely"
-          : nearest?.expiresAt
-            ? `First expires ${fullDate(nearest.expiresAt)}`
-            : nearest
-              ? "Reset expiry not reported"
-              : resetCount > 0
-                ? "Open details to check expiry"
-                : "Refresh limits to check availability",
-      ),
-    );
-    const resetButton = elem(
-      "button",
-      "secondary reset-button",
-      pending ? "Retry reset…" : "Use reset…",
-    );
-    resetButton.id = `reset-${a.name}`;
-    resetButton.type = "button";
-    resetButton.setAttribute(
-      "aria-label",
-      `${pending ? "Retry" : "Use"} saved reset for ${name(a)}`,
-    );
-    resetButton.disabled =
-      !!data.draining ||
-      !a.signedIn ||
-      resets?.busy ||
-      ["waiting", "checking", "resetting"].includes(a.drainStatus?.phase) ||
-      (!pending && resetCount === 0);
-    resetButton.addEventListener("click", () => openReset(a.name));
-    resetPanel.append(resetSummary, resetButton);
-    detailContent.append(resetPanel);
-    if (resets?.error)
-      detailContent.append(elem("p", "usage-error", resets.error));
-    if (a.usageError)
-      detailContent.append(elem("p", "usage-error", a.usageError));
-    const bottom = elem("div", "card-bottom");
-    bottom.append(
-      elem("span", "", a.usageSource || "Awaiting a usage reading"),
-      elem("span", "", ago(a.usageUpdatedAt)),
-    );
-    detailContent.append(bottom);
-    card.append(details);
     cards.push(card);
   }
   return cards;

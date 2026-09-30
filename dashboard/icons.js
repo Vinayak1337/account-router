@@ -1,4 +1,5 @@
 const paths = {
+  clock: "M12 8v5l3 2 M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0",
   refresh:
     "M20 7v5h-5 M4 17v-5h5 M6 8a7 7 0 0 1 11-3l3 3 M18 16a7 7 0 0 1-11 3l-3-3",
   plus: "M12 5v14 M5 12h14",

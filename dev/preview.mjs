@@ -7,7 +7,7 @@ const encode=x=>`h.${Buffer.from(JSON.stringify(x)).toString('base64url')}.s`;
 const names='abcdefghij'.split('');
 for(const name of names){
  await mkdir(join(root,name));
- await atomicJson(join(root,name,'auth.json'),{tokens:{account_id:`test-${name}`,access_token:encode({exp:Date.now()/1000+3600,'https://api.openai.com/auth':{chatgpt_account_id:`test-${name}`}}),refresh_token:'fake-test-refresh',id_token:encode({name:({a:'Mira',b:'Avery',c:'Noor',d:'Reese',e:'Sage',f:'Rowan',g:'Kai',h:'Morgan',i:'Arden',j:'Ellis'})[name],email:`test-${name}@example.test`,'https://api.openai.com/auth':{chatgpt_plan_type:name==='b'?'go':['f','g','h','i'].includes(name)?'free':'plus'}})}});
+ await atomicJson(join(root,name,'auth.json'),{tokens:{account_id:`test-${name}`,access_token:encode({exp:Date.now()/1000+3600,'https://api.openai.com/auth':{chatgpt_account_id:`test-${name}`}}),refresh_token:'fake-test-refresh',id_token:encode({name:({a:'Mira',b:'Avery',c:'Noor',d:'Reese',e:'Sage',f:'Rowan',g:'Kai',h:'Morgan',i:'Arden',j:'Ellis'})[name],email:`test-${name}@example.test`,'https://api.openai.com/auth':{chatgpt_subscription_active_until:new Date(Date.now()+26*86400000).toISOString(),chatgpt_plan_type:name==='b'?'go':['f','g','h','i'].includes(name)?'free':'plus'}})}});
 }
 let wired=true;
 const router=await createRouter({strategy:'exhaust-first',freeSolRouting:false,accounts:names.map(name=>({name,home:name}))},{root,key:'isolated-stability-verification-key',persist:false,connectionRunner:async()=>({wired,provider:wired?'local_paid_accounts':'openai'}),wireRunner:async({enabled})=>{wired=enabled;return {wired,state:enabled?'configured':'disabled',message:'Isolated fixture: connection '+(enabled?'wired':'unwired')+'.'};},fetcher:async(url,o)=>{
@@ -18,4 +18,8 @@ const router=await createRouter({strategy:'exhaust-first',freeSolRouting:false,a
  return new Response('data: {"type":"response.completed","response":{"id":"test-response"}}\n\n',{headers:{'content-type':'text/event-stream'}});
 }});
 for(const a of router.accounts){a.usage=a.name==='d'?{}:{primary:{usedPercent:['c','e'].includes(a.name)?100:({a:13,b:31,f:58,g:42,h:77,i:8,j:22})[a.name]||25,resetsAt:Date.now()/1000+(a.name==='e'?-100:18000),windowMinutes:300},secondary:{usedPercent:38,resetsAt:Date.now()/1000+380000,windowMinutes:10080}};a.usageUpdatedAt=Date.now();}
+for (const a of router.accounts) {
+ a.credits={balance:0,unlimited:false};
+ a.benefits.details={availableCount:2,updatedAt:Date.now(),error:null,credits:[{id:'earlier',status:'available',supported:true,expiryKnown:true,expiresAt:Math.floor(Date.now()/1000)+28*86400,title:'Full usage reset'}]};
+}
 router.server.listen(18892,'127.0.0.1',()=>console.log(JSON.stringify({port:18892,pid:process.pid,root})));

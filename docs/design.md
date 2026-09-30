@@ -14,3 +14,7 @@ Artwork and icons are original SVG geometry. The README screenshot contains synt
 ## Drain controls
 
 Three compact account actions: select, recurring, Drain. Drain is a persistent, per-account toggle; armed is distinct from active. A temporary fallback banner names the account being reset and explains the return. Waiting, resetting, paused and depleted states are visible on the card; full recovery guidance lives in Details. Account email is available in Details and the identity tooltip. Updates preserve card nodes, expanded details, keyboard focus and viewport. Motion respects reduced-motion preferences.
+
+## Account details
+
+A dedicated Details component renders compact definition rows with aligned values, short dates with exact timestamps in tooltips, a distinct saved-reset panel, and one quiet freshness line. Native disclosure state and existing confirmation flows are preserved. The panel adapts to the minimum desktop width in both themes.

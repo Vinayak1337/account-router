@@ -268,6 +268,7 @@ export function createDashboard({
       ...[
         "app.js",
         "cards.js",
+        "details.js",
         "dom.js",
         "icons.js",
         "style.css",
