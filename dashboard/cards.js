@@ -325,7 +325,7 @@ export function accountCards(data, ctx) {
     if (entries.length)
       for (const [side, w] of entries) usage.append(usageWindow(side, w));
     else usage.append(usageWindow("primary", null));
-    card.append(usage, cardActions);
+    card.append(cardActions, usage);
     const drainState = a.drainStatus || { phase: "off" };
     if (a.drainEnabled) {
       const labels = {

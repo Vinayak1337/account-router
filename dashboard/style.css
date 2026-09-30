@@ -316,68 +316,42 @@ select {
 .actions .primary {
   font-size: 12px;
 }
-.list-labels,
-.account-card {
-  display: grid;
-  grid-template-columns:
-    52px minmax(160px, 1fr) minmax(230px, 1.35fr)
-    280px 66px;
-  column-gap: 20px;
-}
-.list-labels {
-  padding: 0 20px 10px;
-  color: var(--muted);
-  font-size: 11px;
-}
-.list-labels > :first-child {
-  font-size: 0;
-}
 .account-grid {
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  background: var(--surface);
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  align-items: start;
 }
 .account-card {
-  padding: 22px 20px;
-  min-height: 112px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  min-width: 0;
+  padding: 24px;
   position: relative;
-  align-items: center;
-  border-bottom: 1px solid var(--line);
-}
-.account-card:last-child {
-  border-bottom: 0;
-}
-.account-card:first-child {
-  border-radius: 11px 11px 0 0;
-}
-.account-card:last-child {
-  border-radius: 0 0 11px 11px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 16px;
 }
 .account-card.next {
-  background: color-mix(in srgb, var(--accent-soft) 30%, var(--surface));
-}
-.account-card.next:before {
-  content: "";
-  position: absolute;
-  left: -1px;
-  top: 23px;
-  height: 34px;
-  width: 3px;
-  border-radius: 0 3px 3px 0;
-  background: var(--accent);
+  border-color: var(--accent);
 }
 .order-controls {
-  display: grid;
-  grid-template-columns: 26px 26px;
+  position: absolute;
+  top: 24px;
+  right: 20px;
+  display: flex;
   align-items: center;
-  justify-content: start;
+  gap: 4px;
   color: var(--muted);
 }
 .order-position {
+  width: 16px;
   text-align: center;
   font-size: 11px;
 }
 .drag-handle {
+  width: 24px;
   cursor: grab;
   touch-action: none;
   display: flex;
@@ -398,6 +372,8 @@ select {
   width: 12px;
 }
 .account-top {
+  min-height: 44px;
+  padding-right: 116px;
   display: flex;
   align-items: center;
   gap: 12px;
@@ -475,8 +451,8 @@ select {
   white-space: normal;
   line-height: 1.25;
   overflow-wrap: anywhere;
-  width: 96px;
-  flex: none;
+  width: auto;
+  flex: 1;
 }
 .select-account.selected-account:disabled {
   opacity: 1;
@@ -508,7 +484,6 @@ select {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 20px;
   min-width: 0;
-  padding-right: 12px;
 }
 .usage-grid:has(> .usage-window:only-child) {
   grid-template-columns: 1fr;
@@ -562,18 +537,16 @@ select {
   color: var(--error);
 }
 .account-details {
-  grid-column: 1/-1;
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
   min-width: 0;
 }
 .account-details summary {
-  position: absolute;
-  top: 38px;
-  right: 20px;
   display: flex;
   gap: 6px;
   align-items: center;
-  justify-content: flex-end;
-  min-height: 32px;
+  justify-content: space-between;
+  min-height: 24px;
   cursor: pointer;
   list-style: none;
   color: var(--muted);
@@ -595,11 +568,9 @@ select {
   transform: rotate(180deg);
 }
 .detail-content {
-  margin: 20px 0 0 72px;
-  padding: 20px 0 0;
-  border-top: 1px solid var(--line);
+  margin: 16px 0 0;
   display: grid;
-  grid-template-columns: minmax(0, 1.5fr) minmax(250px, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 16px 32px;
   align-items: start;
   font-size: 12px;
@@ -686,13 +657,11 @@ select {
   overflow-wrap: anywhere;
 }
 .drain-status {
-  grid-column: 2/-1;
   display: flex;
   align-items: center;
   gap: 7px;
   color: var(--muted);
   font-size: 11px;
-  margin-top: 12px;
 }
 .drain-status .icon {
   width: 14px;
@@ -917,30 +886,6 @@ dialog select {
   .app-header {
     padding: 0 24px;
   }
-  .list-labels {
-    display: none;
-  }
-  .account-card {
-    grid-template-columns: 48px minmax(150px, 1fr) minmax(220px, 1fr) 66px;
-    gap: 0 18px;
-    padding: 20px;
-  }
-  .order-controls {
-    grid-template-columns: 24px 24px;
-  }
-  .move-button {
-    width: 24px;
-  }
-  .card-actions {
-    grid-column: 2/4;
-    margin-top: 16px;
-  }
-  .account-details summary {
-    top: 30px;
-  }
-  .detail-content {
-    margin-left: 58px;
-  }
   .live-status {
     grid-column: 1;
     grid-row: auto;
@@ -1006,50 +951,17 @@ dialog select {
   .order-note {
     display: none;
   }
-  .account-card {
-    grid-template-columns: 48px minmax(0, 1fr) 65px;
-    gap: 0 12px;
-    padding: 20px 16px;
-  }
-  .order-controls {
-    grid-template-columns: 24px 24px;
-  }
-  .move-button {
-    width: 24px;
-  }
   .avatar {
     width: 32px;
     height: 32px;
   }
   .account-top {
+    min-height: 44px;
+    padding-right: 116px;
     gap: 9px;
-  }
-  .account-details summary {
-    right: 16px;
-    top: 28px;
-  }
-  .usage-grid {
-    grid-column: 1/-1;
-    padding-right: 0;
-    margin-top: 20px;
-  }
-  .card-actions {
-    grid-column: 1/-1;
-    flex-wrap: wrap;
-    margin-top: 16px;
-    gap: 6px;
   }
   .card-actions button {
     padding-inline: 8px;
-  }
-  .select-account {
-    width: auto;
-    min-width: 84px;
-  }
-  .detail-content {
-    margin-left: 0;
-    grid-template-columns: 1fr;
-    gap: 18px;
   }
   .detail-facts {
     gap: 16px;
@@ -1080,5 +992,23 @@ dialog select {
     animation: none !important;
     transition: none !important;
     scroll-behavior: auto !important;
+  }
+}
+
+@media (max-width: 900px) {
+  .account-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+@media (max-width: 740px) {
+  .account-card {
+    padding: 20px;
+  }
+  .order-controls {
+    top: 20px;
+    right: 16px;
+  }
+  .card-actions {
+    flex-wrap: wrap;
   }
 }

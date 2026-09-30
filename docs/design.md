@@ -1,8 +1,8 @@
 # Design
 
-A compact account workspace. One aligned priority list puts account identity, remaining usage and routing controls on the same row. Selected accounts have a quiet blue edge. Current routing sits above the list; settings and activity stay below it. No decorative background or marketing sections.
+A compact account workspace. A two-column priority grid groups each account’s identity, routing controls and remaining usage in its own card. Selected accounts have a blue outline. Current routing sits above the grid; settings and activity stay below it. No decorative background or marketing sections.
 
-Details expand across their account row. Short, labelled facts sit beside a saved-reset panel, with full timestamps in tooltips and confirmation before a manual reset. At narrower widths the same controls move below identity; details stack without horizontal scrolling. Dark and light themes use system typography, tabular numbers and the existing SVG icon family.
+Details expand inside their account card. Short, labelled facts sit above a saved-reset panel, with full timestamps in tooltips and confirmation before a manual reset. At narrower widths the grid becomes a single column without horizontal scrolling. Dark and light themes use system typography, tabular numbers and the existing SVG icon family.
 
 The frontend retains its vanilla modules and keyed DOM reconciliation. Status ticks preserve scroll, focus, account picker choice and expanded disclosures. Priority supports dragging and keyboard-accessible arrows. Dialog and meter motion respects reduced-motion preferences. Selection, recurring, Drain and model-routing behavior remain in their existing modules.
 
