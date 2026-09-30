@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="Local account routing for Codex" />
+    <title>Account Router</title>
+    <link rel="icon" href="/dashboard/mark.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/dashboard/style.css" />
+    <script src="/dashboard/app.js" type="module"></script>
+  </head>
+  <body>
+    <a class="skip" href="#accounts">Skip to accounts</a>
+    <div class="ambient" aria-hidden="true">
+      <svg viewBox="0 0 1000 800" fill="none">
+        <path
+          d="M40 360H300Q380 360 380 280V100M380 280Q380 440 540 440H940M540 440Q620 440 620 520V740"
+        />
+        <circle cx="380" cy="360" r="12" />
+        <circle cx="620" cy="440" r="12" />
+        <circle class="signal" cx="540" cy="440" r="5" />
+      </svg>
+    </div>
+    <header class="app-header">
+      <a class="brand" href="#overview"
+        ><img src="/dashboard/mark.svg" alt="" width="28" height="28" />Account
+        Router</a
+      >
+      <div class="header-actions">
+        <span id="connection" class="pill">Connecting</span
+        ><button
+          id="theme-toggle"
+          class="icon-button"
+          type="button"
+          aria-label="Switch theme"
+        ></button
+        ><button id="wire-codex" class="primary" type="button" disabled>
+          Checking Codex
+        </button>
+      </div>
+    </header>
+    <main id="overview">
+      <div class="page-heading">
+        <div>
+          <p class="eyebrow">Local workspace</p>
+          <h1>Your accounts.</h1>
+        </div>
+        <div class="summary-metrics">
+          <span><strong id="ready">—</strong> ready</span
+          ><span><strong id="inflight">—</strong> active</span
+          ><small id="account-count" class="sr-only"></small>
+        </div>
+      </div>
+      <p id="codex-connection" class="connection-detail" role="status"></p>
+      <div id="notice" role="status" class="notice" hidden></div>
+      <section class="routing-panel" aria-label="Current account">
+        <div class="routing-content">
+          <div class="routing-top">
+            <span id="routing-label" class="eyebrow">New requests</span
+            ><span id="mode" class="routing-tag"></span>
+          </div>
+          <div class="current-identity">
+            <h2 id="routing-name">Connecting…</h2>
+            <div id="routing-plan"></div>
+          </div>
+          <p id="routing-detail" class="muted"></p>
+          <p id="live-status" class="live-status" aria-live="polite"></p>
+        </div>
+        <div class="account-switcher">
+          <label class="sr-only" for="switch-account-select"
+            >Account for new requests</label
+          ><select
+            id="switch-account-select"
+            aria-label="Account for new requests"
+          ></select
+          ><button id="switch-account" type="button" disabled>
+            Use account
+          </button>
+        </div>
+        <div class="sr-only">
+          <p id="last-used"></p>
+          <p id="next-detail"></p>
+        </div>
+      </section>
+      <section id="accounts">
+        <div class="section-heading">
+          <div class="heading-group">
+            <h2>Priority</h2>
+            <span id="count" class="count">0</span
+            ><span class="order-note">Drag to reorder</span>
+          </div>
+          <div class="actions">
+            <button
+              id="refresh"
+              class="icon-button"
+              aria-label="Refresh limits"
+              title="Refresh limits"
+            ></button
+            ><button id="add" class="primary"></button>
+          </div>
+        </div>
+        <p id="order-message" class="sr-only" role="status"></p>
+        <div id="account-grid" class="account-grid">
+          <div class="empty">Connecting to your router…</div>
+        </div>
+      </section>
+      <details class="settings">
+        <summary>Routing settings</summary>
+        <div class="routing-rule">
+          <button
+            id="free-sol-routing"
+            class="recurring-button"
+            aria-pressed="false"
+            disabled
+          >
+            Sol on Free
+          </button>
+          <p id="free-sol-detail" class="muted"></p>
+        </div>
+        <p class="footnote">
+          Uses the selected account for new requests. Existing requests finish
+          on their original account. Ready recurring accounts take priority.
+        </p>
+      </details>
+      <details id="activity" class="activity">
+        <summary>Activity</summary>
+        <div id="events" class="events"></div>
+      </details>
+      <footer>
+        <span class="dot"></span>Local only<span id="local-address"></span>
+      </footer>
+    </main>
+    <dialog id="add-dialog" aria-labelledby="dialog-title">
+      <form id="add-form">
+        <div class="dialog-top">
+          <h2 id="dialog-title">Add account</h2>
+          <button
+            id="close-dialog"
+            type="button"
+            class="icon-button"
+            aria-label="Close"
+          ></button>
+        </div>
+        <p class="muted">
+          Sign in on OpenAI. Your account stays on this computer.
+        </p>
+        <label for="account-label"
+          >Nickname <span class="muted">optional</span></label
+        ><input
+          id="account-label"
+          name="label"
+          maxlength="40"
+          placeholder="Use the OpenAI name"
+          autocomplete="off"
+        />
+        <p id="policy-preview" class="footnote">Switch at 1% remaining.</p>
+        <button class="primary wide" id="start-login" type="submit">
+          Continue to OpenAI
+        </button>
+      </form>
+      <div id="login-progress" hidden>
+        <h3 id="login-title">Finish signing in</h3>
+        <p id="login-message" class="muted"></p>
+        <a
+          id="login-link"
+          class="primary wide link-button"
+          target="_blank"
+          rel="noopener noreferrer"
+          hidden
+          >Open sign-in</a
+        ><button id="cancel-login" class="secondary wide" type="button">
+          Cancel</button
+        ><button id="try-again" class="primary wide" type="button" hidden>
+          Try again
+        </button>
+      </div>
+    </dialog>
+    <dialog id="reset-dialog" aria-labelledby="reset-title">
+      <div class="dialog-top">
+        <h2 id="reset-title">Use reset</h2>
+        <button
+          id="close-reset"
+          type="button"
+          class="icon-button"
+          aria-label="Close reset dialog"
+        ></button>
+      </div>
+      <p id="reset-account" class="reset-account"></p>
+      <p class="muted">
+        Uses one saved reset. Your weekly reset date may change.
+      </p>
+      <label for="reset-credit"
+        >Reset <span class="muted">earliest expiry first</span></label
+      ><select id="reset-credit"></select>
+      <p id="reset-description" class="footnote"></p>
+      <p id="reset-message" class="reset-message" role="status"></p>
+      <button id="confirm-reset" class="primary wide" type="button" disabled>
+        Confirm reset</button
+      ><button id="cancel-reset" class="secondary wide" type="button">
+        Cancel
+      </button>
+    </dialog>
+  </body>
+</html>

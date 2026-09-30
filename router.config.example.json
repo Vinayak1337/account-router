@@ -1,0 +1,6 @@
+{
+  "port": 18891,
+  "strategy": "exhaust-first",
+  "freeSolRouting": false,
+  "accounts": []
+}

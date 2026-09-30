@@ -1,0 +1,62 @@
+{
+  "name": "account-router",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Local account routing for Codex on Windows",
+  "author": "Vinayak1337",
+  "license": "MIT",
+  "main": "desktop/main.cjs",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "electron .",
+    "start:server": "node router.mjs",
+    "preview": "node dev/preview.mjs",
+    "test": "node --test router.test.mjs desktop/*.test.mjs",
+    "build:win": "electron-builder --win nsis"
+  },
+  "dependencies": {
+    "smol-toml": "1.9.0"
+  },
+  "devDependencies": {
+    "electron": "44.5.1",
+    "electron-builder": "26.15.3",
+    "prettier": "3.9.9"
+  },
+  "build": {
+    "appId": "io.github.vinayak1337.account-router",
+    "productName": "Account Router",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "desktop/main.cjs",
+      "dashboard/**",
+      "router.mjs",
+      "dashboard-api.mjs",
+      "account-benefits.mjs",
+      "model-routing.mjs",
+      "recurring-use.mjs",
+      "free-sol-routing.mjs",
+      "codex-integration.mjs",
+      "package.json",
+      "desktop/connection.mjs",
+      "desktop/login.mjs",
+      "desktop/icon.png"
+    ],
+    "win": {
+      "target": "nsis",
+      "artifactName": "Account-Router-${version}-Setup.exe",
+      "icon": "desktop/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "deleteAppDataOnUninstall": false
+    }
+  }
+}
