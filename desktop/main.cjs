@@ -11,6 +11,8 @@ const { join, resolve } = require("node:path");
 const { pathToFileURL } = require("node:url");
 const fs = require("node:fs/promises");
 app.setName("Account Router");
+if (process.platform === "win32")
+  app.setAppUserModelId("io.github.vinayak1337.account-router");
 const args = process.argv.slice(app.isPackaged ? 1 : 2),
   dataIndex = args.indexOf("--data-dir");
 const root = resolve(
@@ -122,7 +124,10 @@ async function start() {
   key = await localKey(root);
   const existing = await health(config.port);
   if (existing) {
-    if (resolve(existing.root).toLowerCase() !== root.toLowerCase() || existing.draining)
+    if (
+      resolve(existing.root).toLowerCase() !== root.toLowerCase() ||
+      existing.draining
+    )
       throw new Error(
         "A different or shutting-down router owns this port. Reopen Account Router after it stops.",
       );
@@ -173,7 +178,10 @@ async function start() {
     backgroundColor: "#161719",
     autoHideMenuBar: true,
     show: false,
-    icon: join(__dirname, "icon.png"),
+    icon: join(
+      __dirname,
+      process.platform === "win32" ? "icon.ico" : "icon.png",
+    ),
     webPreferences: {
       sandbox: true,
       contextIsolation: true,
@@ -210,7 +218,7 @@ async function start() {
   });
   window.once("ready-to-show", () => window.show());
   await window.loadURL(origin + "/dashboard");
-  tray = new Tray(nativeImage.createFromPath(join(__dirname, "icon.png")));
+  tray = new Tray(nativeImage.createFromPath(join(__dirname, "tray.png")));
   tray.setToolTip("Account Router");
   tray.setContextMenu(
     Menu.buildFromTemplate([

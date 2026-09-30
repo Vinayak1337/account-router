@@ -18,3 +18,7 @@ Three compact account actions: select, recurring, Drain. Drain is a persistent, 
 ## Account details
 
 A dedicated Details component renders compact definition rows with aligned values, short dates with exact timestamps in tooltips, a distinct saved-reset panel, and one quiet freshness line. Native disclosure state and existing confirmation flows are preserved. The panel adapts to the minimum desktop width in both themes.
+
+## Windows icon
+
+Original routing mark shared by the dashboard, app window, installer and shortcuts. The ICO includes ten sizes from 16 to 256 pixels; the tray uses a dedicated 32-pixel PNG. Regenerate assets with `python dev/build-icon.py` (Pillow required). Windows uses an explicit application identity for taskbar grouping.

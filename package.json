@@ -1,6 +1,6 @@
 {
   "name": "account-router",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "private": true,
   "type": "module",
   "description": "Local account routing for Codex on Windows",
@@ -45,7 +45,9 @@
       "package.json",
       "desktop/connection.mjs",
       "desktop/login.mjs",
-      "desktop/icon.png"
+      "desktop/icon.png",
+      "desktop/icon.ico",
+      "desktop/tray.png"
     ],
     "win": {
       "target": "nsis",
@@ -57,7 +59,9 @@
       "perMachine": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
-      "deleteAppDataOnUninstall": false
+      "deleteAppDataOnUninstall": false,
+      "installerIcon": "desktop/icon.ico",
+      "uninstallerIcon": "desktop/icon.ico"
     }
   }
 }
