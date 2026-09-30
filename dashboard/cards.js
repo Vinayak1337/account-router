@@ -218,9 +218,9 @@ export function accountCards(data, ctx) {
                     : "Ready",
         ),
       );
-    top.append(badges);
+    identity.append(badges);
     card.append(top);
-    identity.append(planBadge(a));
+    identity.insertBefore(planBadge(a), badges);
     identity.title = a.profile?.email || a.name;
     const selectButton = elem(
       "button",
@@ -317,7 +317,7 @@ export function accountCards(data, ctx) {
     drainButton.disabled = !data.canSelect || drainSaving.has(a.name);
     drainButton.addEventListener("click", () => toggleDrain(a.name));
     cardActions.append(selectButton, recurringRow, drainButton);
-    card.append(cardActions);
+
     const entries = Object.entries(a.usage).filter(
       ([, w]) => w && (w.usedPercent !== 0 || w.resetsAt || w.windowMinutes),
     );
@@ -325,7 +325,7 @@ export function accountCards(data, ctx) {
     if (entries.length)
       for (const [side, w] of entries) usage.append(usageWindow(side, w));
     else usage.append(usageWindow("primary", null));
-    card.append(usage);
+    card.append(usage, cardActions);
     const drainState = a.drainStatus || { phase: "off" };
     if (a.drainEnabled) {
       const labels = {

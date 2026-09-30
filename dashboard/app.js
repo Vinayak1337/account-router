@@ -379,7 +379,7 @@ function usageWindow(side, w) {
   const number = elem(
     "strong",
     "",
-    known ? `${Number(remaining.toFixed(1))}%` : "—",
+    known ? `${Number(remaining.toFixed(1))}%` : "Unknown",
   );
   number.append(elem("small", "", known ? "left" : "unknown"));
   top.append(number);
@@ -560,10 +560,12 @@ function renderState(data) {
     ? "Checking availability. The next ready account is chosen from Priority 1."
     : next
       ? `${sol?.enabled ? "Sol first tries ready Free accounts; other models use this account." : "New requests use this account."}`
-      : "No ready account — waiting for refreshed limits or another sign-in.";
+      : "No ready account. Waiting for refreshed limits or another sign-in.";
   $("live-status").textContent = active.length
     ? active.map((a) => `${name(a)} · ${a.activeRequests} active`).join(" / ")
-    : "Ready for new requests";
+    : next && canChoose(next)
+      ? "Ready for new requests"
+      : "Waiting for available usage";
   $("last-used").textContent = last
     ? `Last used: ${name(last)} · ${last.profile?.email || last.name}`
     : "No account used in this proxy session yet.";
@@ -863,11 +865,11 @@ async function update() {
         });
       $("connection").textContent = "Offline";
       $("connection").className = "pill offline";
-      $("routing-label").textContent = "LAST KNOWN SELECTION";
+      $("routing-label").textContent = "Last known selection";
       $("live-status").textContent =
-        "Active requests unknown — router unavailable.";
-      $("inflight").textContent = "—";
-      $("ready").textContent = "—";
+        "Active requests unknown. Router unavailable.";
+      $("inflight").textContent = "?";
+      $("ready").textContent = "?";
       document
         .querySelectorAll(".account-badges")
         .forEach((el) =>

@@ -1,6 +1,6 @@
 {
   "name": "account-router",
-  "version": "1.1.2",
+  "version": "1.2.0",
   "private": true,
   "type": "module",
   "description": "Local account routing for Codex on Windows",
@@ -14,8 +14,9 @@
     "start": "electron .",
     "start:server": "node router.mjs",
     "preview": "node dev/preview.mjs",
-    "test": "node --test router.test.mjs desktop/*.test.mjs",
-    "build:win": "electron-builder --win nsis"
+    "test": "node --test router.test.mjs desktop/*.test.mjs dev/live-preview.test.mjs",
+    "build:win": "electron-builder --win nsis",
+    "preview:live": "node dev/live-preview.mjs"
   },
   "dependencies": {
     "smol-toml": "1.9.0"

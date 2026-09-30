@@ -1,6 +1,6 @@
 # Account Router
 
-A local Windows account switcher for **Codex**. Minimal dashboard, usage meters, account priority, recurring use, and saved resets.
+A local Windows account switcher for **Codex**. Compact account list, usage meters, account priority, recurring use, and saved resets.
 
 ![Dashboard](docs/dashboard.jpg)
 
@@ -51,7 +51,9 @@ npm start
 npm run build:win
 ```
 
-Installer: `dist/Account-Router-1.1.2-Setup.exe`. `npm run preview` opens an isolated fixture at `http://127.0.0.1:18892/dashboard`; it uses synthetic accounts and never calls OpenAI.
+Installer: `dist/Account-Router-1.2.0-Setup.exe`. `npm run preview` opens an isolated fixture at `http://127.0.0.1:18892/dashboard`; it uses synthetic accounts and never calls OpenAI.
+
+To preview frontend edits against the running app without restarting it, run `npm run preview:live` and open `http://127.0.0.1:18893/dashboard`. This browser view uses your real accounts and controls; keep the app running.
 
 To reuse an existing router directory, launch `"Account Router.exe" --data-dir "C:\path\to\router"`. Run only one router per account store. Never commit `accounts`, `.runtime`, or `router.config.json`.
 

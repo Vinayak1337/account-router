@@ -1,24 +1,22 @@
 # Design
 
-A compact desktop utility: top navigation, one current-account panel, two-column priority cards, and account details on demand. Neutral surfaces, one blue accent, system typography, tabular numbers, and one SVG icon family. Dark mode is the default; light mode persists locally.
+A compact account workspace. One aligned priority list puts account identity, remaining usage and routing controls on the same row. Selected accounts have a quiet blue edge. Current routing sits above the list; settings and activity stay below it. No decorative background or marketing sections.
 
-The dashboard reconciles keyed DOM nodes. Background updates preserve scroll, focus, native select choice, and expanded details. Motion uses transform/opacity and respects reduced-motion preferences.
+Details expand across their account row. Short, labelled facts sit beside a saved-reset panel, with full timestamps in tooltips and confirmation before a manual reset. At narrower widths the same controls move below identity; details stack without horizontal scrolling. Dark and light themes use system typography, tabular numbers and the existing SVG icon family.
 
-Guidance adapted from:
+The frontend retains its vanilla modules and keyed DOM reconciliation. Status ticks preserve scroll, focus, account picker choice and expanded disclosures. Priority supports dragging and keyboard-accessible arrows. Dialog and meter motion respects reduced-motion preferences. Selection, recurring, Drain and model-routing behavior remain in their existing modules.
 
-- [Appllama App Design](https://github.com/Appllama/appllama-skills/tree/dd5caaec3d5d50ad7fc0324da238119c6b7c3707/skills/appllama-app-design-skill), v1.3.0, MIT: semantic themes, native control conventions, purposeful motion, full state cycles.
-- [Taste Skill](https://www.tasteskill.dev/docs), [pinned source](https://github.com/Leonxlnx/taste-skill/tree/ce26fc25c0e5e8cab638f883de62d9a86ee5e45b/skills): redesign audit, minimalist surfaces, spacing, and interaction feedback. Marketing hero and scroll-pinning prescriptions were omitted for this utility.
+## Guidance
 
-Artwork and icons are original SVG geometry. The README screenshot contains synthetic preview accounts, not user accounts.
+- [Adam Holter's frontend skill](https://github.com/adamholter/frontend-skill/blob/5b2cf1ed3f28e0013a0626ddc83313ca552565fa/SKILL.md), pinned at `5b2cf1e`: product-led layout, minimal copy, existing primitives, restrained surfaces and real interaction checks. Discovered through [his frontend tests](https://adam.holter.com/tests/).
+- Earlier design guidance: [Appllama App Design](https://github.com/Appllama/appllama-skills/tree/dd5caaec3d5d50ad7fc0324da238119c6b7c3707/skills/appllama-app-design-skill), v1.3.0, MIT, and [Taste Skill](https://github.com/Leonxlnx/taste-skill/tree/ce26fc25c0e5e8cab638f883de62d9a86ee5e45b/skills).
 
-## Drain controls
+Artwork and icons are original SVG geometry. Published screenshots contain only synthetic preview accounts.
 
-Three compact account actions: select, recurring, Drain. Drain is a persistent, per-account toggle; armed is distinct from active. A temporary fallback banner names the account being reset and explains the return. Waiting, resetting, paused and depleted states are visible on the card; full recovery guidance lives in Details. Account email is available in Details and the identity tooltip. Updates preserve card nodes, expanded details, keyboard focus and viewport. Motion respects reduced-motion preferences.
+## Preview without restarting
 
-## Account details
-
-A dedicated Details component renders compact definition rows with aligned values, short dates with exact timestamps in tooltips, a distinct saved-reset panel, and one quiet freshness line. Native disclosure state and existing confirmation flows are preserved. The panel adapts to the minimum desktop width in both themes.
+`npm run preview:live` serves source dashboard files on loopback port 18893 against the installed router on 18891. It reads no account files, starts no router and forwards only allowlisted dashboard operations. The existing router owns authentication. Host, origin, action headers and request size are checked before forwarding; inference and arbitrary destinations are unavailable. This development helper is excluded from the Windows package.
 
 ## Windows icon
 
-Original routing mark shared by the dashboard, app window, installer and shortcuts. The ICO includes ten sizes from 16 to 256 pixels; the tray uses a dedicated 32-pixel PNG. Regenerate assets with `python dev/build-icon.py` (Pillow required). Windows uses an explicit application identity for taskbar grouping.
+The routing mark is shared by the dashboard, window, installer and shortcuts. The ICO includes ten sizes from 16 to 256 pixels; the tray uses a dedicated 32-pixel PNG. Regenerate with `python dev/build-icon.py` (Pillow required). Windows has an explicit application identity for taskbar grouping.

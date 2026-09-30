@@ -11,16 +11,6 @@
   </head>
   <body>
     <a class="skip" href="#accounts">Skip to accounts</a>
-    <div class="ambient" aria-hidden="true">
-      <svg viewBox="0 0 1000 800" fill="none">
-        <path
-          d="M40 360H300Q380 360 380 280V100M380 280Q380 440 540 440H940M540 440Q620 440 620 520V740"
-        />
-        <circle cx="380" cy="360" r="12" />
-        <circle cx="620" cy="440" r="12" />
-        <circle class="signal" cx="540" cy="440" r="5" />
-      </svg>
-    </div>
     <header class="app-header">
       <a class="brand" href="#overview"
         ><img src="/dashboard/mark.svg" alt="" width="28" height="28" />Account
@@ -42,12 +32,11 @@
     <main id="overview">
       <div class="page-heading">
         <div>
-          <p class="eyebrow">Local workspace</p>
-          <h1>Your accounts.</h1>
+          <h1>Accounts</h1>
         </div>
         <div class="summary-metrics">
-          <span><strong id="ready">—</strong> ready</span
-          ><span><strong id="inflight">—</strong> active</span
+          <span><strong id="ready">…</strong> ready</span
+          ><span><strong id="inflight">…</strong> active</span
           ><small id="account-count" class="sr-only"></small>
         </div>
       </div>
@@ -85,7 +74,7 @@
       <section id="accounts">
         <div class="section-heading">
           <div class="heading-group">
-            <h2>Priority</h2>
+            <h2>Account priority</h2>
             <span id="count" class="count">0</span
             ><span class="order-note">Drag to reorder</span>
           </div>
@@ -100,36 +89,40 @@
           </div>
         </div>
         <p id="order-message" class="sr-only" role="status"></p>
+        <div class="list-labels" aria-hidden="true">
+          <span>Order</span><span>Account</span><span>Usage remaining</span
+          ><span>Routing</span><span></span>
+        </div>
         <div id="account-grid" class="account-grid">
           <div class="empty">Connecting to your router…</div>
         </div>
       </section>
-      <details class="settings">
-        <summary>Routing settings</summary>
-        <div class="routing-rule">
-          <button
-            id="free-sol-routing"
-            class="recurring-button"
-            aria-pressed="false"
-            disabled
-          >
-            Sol on Free
-          </button>
-          <p id="free-sol-detail" class="muted"></p>
-        </div>
-        <p class="footnote">
-          Uses the selected account for new requests. Existing requests finish
-          on their original account. Drain takes precedence while active;
-          otherwise ready recurring accounts take priority.
-        </p>
-      </details>
-      <details id="activity" class="activity">
-        <summary>Activity</summary>
-        <div id="events" class="events"></div>
-      </details>
-      <footer>
-        <span class="dot"></span>Local only<span id="local-address"></span>
-      </footer>
+      <div class="workspace-tools">
+        <details class="settings">
+          <summary>Routing settings</summary>
+          <div class="routing-rule">
+            <button
+              id="free-sol-routing"
+              class="recurring-button"
+              aria-pressed="false"
+              disabled
+            >
+              Sol on Free
+            </button>
+            <p id="free-sol-detail" class="muted"></p>
+          </div>
+          <p class="footnote">
+            Uses the selected account for new requests. Existing requests finish
+            on their original account. Drain takes precedence while active;
+            otherwise ready recurring accounts take priority.
+          </p>
+        </details>
+        <details id="activity" class="activity">
+          <summary>Activity</summary>
+          <div id="events" class="events"></div>
+        </details>
+      </div>
+      <footer>Local workspace<span id="local-address"></span></footer>
     </main>
     <dialog id="add-dialog" aria-labelledby="dialog-title">
       <form id="add-form">
