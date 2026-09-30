@@ -42,6 +42,8 @@ export function createDashboard({
   reorderAccounts,
   selectAccount,
   setRecurringUse,
+  setDrainUse,
+  resetBusy,
   setFreeSolRouting,
   reconcileSelection,
   loginRunner = windowsLogin,
@@ -357,6 +359,9 @@ export function createDashboard({
       } else if (url.pathname === "/dashboard/api/accounts/select") {
         await selectAccount(input.name);
         reply(res, 200, { ...(await status()), requestedAccount: input.name });
+      } else if (url.pathname === "/dashboard/api/accounts/drain") {
+        await setDrainUse(input.name, input.enabled);
+        reply(res, 200, await status());
       } else if (url.pathname === "/dashboard/api/accounts/recurring") {
         await setRecurringUse(input.name, input.enabled);
         reply(res, 200, await status());
@@ -380,6 +385,10 @@ export function createDashboard({
           if (input.confirmed !== true)
             throw new Error(
               "Confirm the selected account and saved reset first.",
+            );
+          if (resetBusy?.(account))
+            throw new Error(
+              "Drain is already handling this account. Wait for its reset cycle to finish.",
             );
           const result = await account.benefits.consume(input.creditId);
           await reconcileSelection();

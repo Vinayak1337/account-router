@@ -17,6 +17,7 @@ import {
   subscriptionFromClaims,
 } from "./account-benefits.mjs";
 import { effectiveModel } from "./model-routing.mjs";
+import { DrainUse } from "./drain-use.mjs";
 import { RecurringUse } from "./recurring-use.mjs";
 import { FreeSolRouting, modelUnavailable } from "./free-sol-routing.mjs";
 
@@ -44,7 +45,9 @@ export function accountPolicy(account, now = Date.now()) {
   const remaining = windows.length
     ? Math.max(0, Math.min(...windows.map((w) => 100 - w.usedPercent)))
     : null;
-  const threshold = account.switchAtRemainingPercent ?? 1;
+  const threshold = account.drainEnabled
+    ? 0
+    : (account.switchAtRemainingPercent ?? 1);
   const atThreshold = remaining !== null && remaining <= threshold;
   const resets = windows
     .filter((w) => 100 - w.usedPercent <= threshold)
@@ -179,6 +182,12 @@ export class Account {
     )
       throw new Error("Recurring use must be true or false.");
     this.recurringUse = spec.recurringUse === true;
+    if (
+      spec.drainEnabled !== undefined &&
+      typeof spec.drainEnabled !== "boolean"
+    )
+      throw new Error("Drain must be true or false.");
+    this.drainEnabled = spec.drainEnabled === true;
     this.profile = {};
     this.usageUpdatedAt = null;
     this.usageSource = null;
@@ -527,6 +536,7 @@ export async function createRouter(
   let stateSaveError = null,
     draining = false,
     drainPromise = null;
+  let drainUse = null;
   let recurring = null,
     savedRecurring = null;
   if (persist) {
@@ -547,7 +557,9 @@ export async function createRouter(
       );
       selectedAccount =
         saved.selectedAccount ?? saved.nextAccount ?? saved.active ?? null;
-      selectionSource = ["manual", "recurring"].includes(saved.selectionSource)
+      selectionSource = ["manual", "recurring", "drain"].includes(
+        saved.selectionSource,
+      )
         ? saved.selectionSource
         : "automatic";
       savedRecurring = saved.recurringUse || null;
@@ -623,6 +635,7 @@ export async function createRouter(
   function eligible(account) {
     return (
       account &&
+      !drainUse?.unavailable(account) &&
       account.signedIn !== false &&
       account.blockedUntil <= Date.now() &&
       !["sign-in-required", "identity-changed"].includes(account.reason) &&
@@ -648,12 +661,28 @@ export async function createRouter(
     refresh: refreshForRouting,
   });
   function watchAccount(account) {
-    account.onUsageChange = () => recurring.changedAccount(account);
+    account.onUsageChange = () => {
+      recurring.changedAccount(account);
+      drainUse?.inspect();
+    };
     return account;
   }
   accounts.forEach(watchAccount);
   if (!accounts.some((a) => a.name === selectedAccount))
     selectedAccount = routingOrder().find(eligible)?.name || null;
+  drainUse = new DrainUse({
+    root,
+    accounts,
+    selected: () => selectedAccount,
+    intent: () => selectionIntent,
+    policy: accountPolicy,
+    write: atomicJson,
+    changed: () => save(),
+    fallback: () => reconcileSelection(),
+    restore: (account) => setSelection(account, "drain"),
+    record,
+  });
+  await drainUse.ready;
   function setSelection(account, source) {
     const name = account?.name || null;
     if (selectedAccount === name && selectionSource === source) return;
@@ -701,6 +730,16 @@ export async function createRouter(
       if (signal?.aborted) throw new Error("Request cancelled.");
       const version = selectionVersion,
         priorityVersion = orderVersion;
+      drainUse.inspect();
+      const drainOwner = drainUse.owner();
+      if (drainOwner && !excluded.has(drainOwner)) {
+        await refreshForRouting(drainOwner);
+        drainUse.inspect();
+        if (version !== selectionVersion || priorityVersion !== orderVersion)
+          continue;
+        if (drainUse.owner() === drainOwner && eligible(drainOwner))
+          return { account: drainOwner, version };
+      }
       await recurring.refreshDue();
       if (version !== selectionVersion || priorityVersion !== orderVersion)
         continue;
@@ -754,6 +793,16 @@ export async function createRouter(
   ) {
     for (;;) {
       if (signal?.aborted) throw new Error("Request cancelled.");
+      drainUse.inspect();
+      const owner = drainUse.owner();
+      if (owner && !excluded.has(owner)) {
+        const selection = await reconcileSelection(excluded, signal);
+        if (
+          selection.account === drainUse.owner() &&
+          eligible(selection.account)
+        )
+          return { ...selection, orderVersion, routingVersion, route: "drain" };
+      }
       const routeVersion = routingVersion,
         priorityVersion = orderVersion,
         version = selectionVersion;
@@ -800,6 +849,11 @@ export async function createRouter(
       !eligible(choice.account)
     )
       return false;
+    drainUse.inspect();
+    const owner = drainUse.owner();
+    if (owner && !excluded.has(owner))
+      return owner === choice.account && eligible(owner);
+    if (choice.route === "drain") return false;
     if (freeSol.denied(choice.account, payload.model)) return false;
     const preferredFree =
       freeSol.matches(payload.model) && !forceUsual
@@ -819,6 +873,7 @@ export async function createRouter(
     const account = accounts.find((a) => a.name === name);
     if (!account) throw new Error("Account not found. Refresh the dashboard.");
     const intent = ++selectionIntent;
+    drainUse.manualSelection();
     await account.load();
     account.signedIn = true;
     if (intent !== selectionIntent) return;
@@ -908,6 +963,32 @@ export async function createRouter(
     recurring.kick();
     await save();
   }
+  async function setDrainUse(name, enabled) {
+    if (typeof enabled !== "boolean")
+      throw new Error("Drain must be true or false.");
+    const account = accounts.find((a) => a.name === name);
+    if (!account) throw new Error("Account not found. Refresh the dashboard.");
+    if (enabled && drainUse.loadError) throw new Error(drainUse.loadError);
+    await commitAccounts(() => ({
+      specs: config.accounts.map((a) =>
+        a.name === name ? { ...a, drainEnabled: enabled } : a,
+      ),
+      items: [...accounts],
+      apply: () => {
+        account.drainEnabled = enabled;
+        routingVersion++;
+      },
+    }));
+    await drainUse.configure(account, enabled);
+    record(
+      account,
+      enabled
+        ? "Drain armed. While selected, use to zero, reset and return."
+        : "Drain disabled.",
+    );
+    drainUse.inspect();
+    await save();
+  }
   async function setFreeSolRouting(enabled) {
     if (typeof enabled !== "boolean")
       throw new Error("Free Sol routing must be true or false.");
@@ -943,6 +1024,13 @@ export async function createRouter(
       serverTime: Date.now(),
       draining,
       stateSaveError,
+      drainCycle:
+        drainUse?.job && !drainUse.job.cancelled
+          ? {
+              account: drainUse.job.account.name,
+              ...drainUse.view(drainUse.job.account),
+            }
+          : null,
       freeSol: freeSol.view(),
       events: [...events],
       inFlight: accounts.reduce((sum, a) => sum + a.activeRequests, 0),
@@ -952,6 +1040,8 @@ export async function createRouter(
         profile: a.profile,
         blockedUntil: a.blockedUntil,
         reason: a.reason,
+        drainEnabled: a.drainEnabled,
+        drainStatus: drainUse?.view(a) || { phase: "off" },
         recurringUse: a.recurringUse,
         recurringStatus: recurring?.view(a) || "off",
         usage: a.usage,
@@ -1013,6 +1103,8 @@ export async function createRouter(
     reorderAccounts,
     selectAccount,
     setRecurringUse,
+    setDrainUse,
+    resetBusy: (account) => drainUse.unavailable(account),
     setFreeSolRouting,
     reconcileSelection,
     loginRunner,
@@ -1037,6 +1129,7 @@ export async function createRouter(
         serving.activeRequests--;
         serving.activeModels.delete(requestIdentity);
       }
+      drainUse.pulse();
       serving = account;
       if (serving) {
         serving.activeRequests++;
@@ -1174,7 +1267,10 @@ export async function createRouter(
       for (;;) {
         if (abort.signal.aborted) throw new Error("Request cancelled.");
         let choice;
-        if (pinned && freeSol.matches(payload.model)) {
+        if (
+          pinned &&
+          (freeSol.matches(payload.model) || drainUse.owner() || drainUse.job)
+        ) {
           choice = await findRequestSelection(
             payload,
             excluded,
@@ -1413,6 +1509,7 @@ export async function createRouter(
         }
         if (
           choice.route !== "free-sol" &&
+          choice.route !== "drain" &&
           choice.version === selectionVersion &&
           config.strategy === "round-robin" &&
           !["manual", "recurring"].includes(selectionSource)
@@ -1578,10 +1675,12 @@ export async function createRouter(
   function drain() {
     if (drainPromise) return drainPromise;
     draining = true;
+    const stopDrain = drainUse.stop();
     const stopRecurring = recurring.stop();
     drainPromise = new Promise((resolveDrain) =>
       server.close(async () => {
         await stopRecurring;
+        await stopDrain;
         await dashboard.settled();
         await Promise.allSettled([...selectionWork]);
         await configWrites;
@@ -1592,6 +1691,7 @@ export async function createRouter(
     );
     return drainPromise;
   }
+  drainUse.inspect();
   recurring.kick();
   return {
     server,
@@ -1599,6 +1699,7 @@ export async function createRouter(
     snapshot,
     drain,
     recurring,
+    drainUse,
     flushed: async () => {
       await configWrites;
       await saveChain;

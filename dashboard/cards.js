@@ -12,13 +12,17 @@ export function accountCards(data, ctx) {
     moveAccount,
     selectForNewRequests,
     toggleRecurring,
+    toggleDrain,
+    drainSaving,
     openReset,
     selectingName,
     recurringSaving,
     $,
   } = ctx;
   const sol = data.freeSol,
-    solRoutes = sol?.routes || [],
+    solRoutes = data.accounts.some((a) => a.drainStatus?.phase === "active")
+      ? []
+      : sol?.routes || [],
     cards = [];
   for (const [index, a] of data.accounts.entries()) {
     const isNext = a.name === (data.selectedAccount ?? data.nextAccount);
@@ -221,6 +225,7 @@ export function accountCards(data, ctx) {
       elem("span", "", `Switch at ${a.policy.switchAtRemainingPercent}%`),
     );
     identity.append(planBadge(a));
+    identity.title = a.profile?.email || a.name;
     const subscription = a.subscription,
       until =
         subscription?.plan === a.profile?.plan
@@ -243,7 +248,11 @@ export function accountCards(data, ctx) {
     details.append(elem("summary", "", "Details"));
     const detailContent = elem("div", "detail-content");
     details.append(detailContent);
-    detailContent.append(meta, expiry);
+    detailContent.append(
+      elem("p", "account-email", a.profile?.email || a.name),
+      meta,
+      expiry,
+    );
     const selectButton = elem(
       "button",
       isNext ? "select-account selected-account" : "select-account",
@@ -321,7 +330,24 @@ export function accountCards(data, ctx) {
     recurringText.classList.add("sr-only");
     recurringRow.append(recurringButton, recurringText);
     const cardActions = elem("div", "card-actions");
-    cardActions.append(selectButton, recurringRow);
+    const drainButton = elem(
+      "button",
+      "drain-button",
+      drainSaving.has(a.name) ? "Saving…" : "Drain",
+    );
+    drainButton.type = "button";
+    drainButton.id = `drain-${a.name}`;
+    drainButton.prepend(icon("drain"));
+    drainButton.setAttribute("aria-pressed", String(!!a.drainEnabled));
+    drainButton.setAttribute(
+      "aria-label",
+      `Drain for ${name(a)} (${a.profile?.email || a.name})`,
+    );
+    drainButton.title =
+      "While selected: use to 0%, switch away, use the earliest-expiring saved reset, then return. Overrides recurring and model routing. Does not change priority.";
+    drainButton.disabled = !data.canSelect || drainSaving.has(a.name);
+    drainButton.addEventListener("click", () => toggleDrain(a.name));
+    cardActions.append(selectButton, recurringRow, drainButton);
     card.append(cardActions);
     const modelUses = a.activeModels?.filter((m) => m.requested) || [];
     const modelLabels = [
@@ -361,6 +387,42 @@ export function accountCards(data, ctx) {
       for (const [side, w] of entries) usage.append(usageWindow(side, w));
     else usage.append(usageWindow("primary", null));
     card.append(usage);
+    const drainState = a.drainStatus || { phase: "off" };
+    if (a.drainEnabled) {
+      const labels = {
+        active: "Drain active",
+        armed: "Drain armed",
+        waiting: "Finishing requests · reset next",
+        checking: "Checking reset",
+        resetting: "Resetting · return next",
+        paused: "Drain paused",
+        depleted: "No resets · normal routing",
+      };
+      const status = elem(
+        "div",
+        "drain-status",
+        labels[drainState.phase] || "Drain armed",
+      );
+      status.dataset.key = "drain-status";
+      status.dataset.phase = drainState.phase;
+      status.prepend(
+        icon(
+          ["waiting", "checking", "resetting"].includes(drainState.phase)
+            ? "refresh"
+            : "drain",
+        ),
+      );
+      status.title = drainState.message || drainButton.title;
+      card.append(status);
+      detailContent.append(
+        elem(
+          "p",
+          "drain-help",
+          drainState.message ||
+            "Drain uses saved resets automatically only while selected. At 0%, traffic switches away and returns after the reset. Priority stays unchanged.",
+        ),
+      );
+    }
     if (a.credits?.balance !== null && a.credits?.balance !== undefined)
       detailContent.append(
         elem(
@@ -419,6 +481,7 @@ export function accountCards(data, ctx) {
       !!data.draining ||
       !a.signedIn ||
       resets?.busy ||
+      ["waiting", "checking", "resetting"].includes(a.drainStatus?.phase) ||
       (!pending && resetCount === 0);
     resetButton.addEventListener("click", () => openReset(a.name));
     resetPanel.append(resetSummary, resetButton);

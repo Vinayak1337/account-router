@@ -51,6 +51,7 @@ let selectingName = null,
   selectionClick = 0;
 let switchChoiceTouched = false;
 const recurringSaving = new Set();
+const drainSaving = new Set();
 let freeSolSaving = false,
   wireBusy = false,
   wireDesired = null;
@@ -83,6 +84,7 @@ const canChoose = (a) =>
   Number.isFinite(a.policy?.remainingPercent) &&
   a.policy.remainingPercent > a.policy.switchAtRemainingPercent &&
   !a.needsResetReading &&
+  !["waiting", "checking", "resetting"].includes(a.drainStatus?.phase) &&
   a.blockedUntil <= Date.now() &&
   !["sign-in-required", "identity-changed"].includes(a.reason);
 function ago(ms) {
@@ -214,7 +216,15 @@ async function api(path, body) {
   return data;
 }
 function notice(text) {
-  $("notice").textContent = text;
+  $("notice").replaceChildren();
+  if (text) {
+    const close = elem("button", "notice-close");
+    close.type = "button";
+    close.setAttribute("aria-label", "Dismiss notification");
+    iconLabel(close, "close");
+    close.addEventListener("click", () => notice(""));
+    $("notice").append(elem("span", "", text), close);
+  }
   $("notice").hidden = !text;
 }
 async function selectForNewRequests(accountName) {
@@ -270,6 +280,31 @@ async function toggleRecurring(accountName) {
     );
   } catch (error) {
     recurringSaving.delete(accountName);
+    notice(error.message);
+    await update();
+  }
+}
+async function toggleDrain(accountName) {
+  const account = state?.accounts.find((a) => a.name === accountName);
+  if (!account || !state.canSelect || drainSaving.has(accountName)) return;
+  const enabled = !account.drainEnabled;
+  drainSaving.add(accountName);
+  render(state);
+  notice("");
+  try {
+    const data = await api("accounts/drain", {
+      name: accountName,
+      enabled,
+    });
+    drainSaving.delete(accountName);
+    render(data);
+    notice(
+      enabled
+        ? `Drain armed for ${name(account)}. Saved resets will be used at 0% while selected.`
+        : `Drain off for ${name(account)}.`,
+    );
+  } catch (error) {
+    drainSaving.delete(accountName);
     notice(error.message);
     await update();
   }
@@ -540,6 +575,20 @@ function renderState(data) {
           ? "Recurring"
           : "Selected"
         : "Automatic";
+  const drainAccount = data.accounts.find(
+    (a) => a.name === data.drainCycle?.account,
+  );
+  if (drainAccount) {
+    $("next-detail").textContent =
+      `${data.drainCycle.phase === "waiting" ? "Finishing active requests on" : "Resetting"} ${name(drainAccount)}. New requests return when its usage is restored.`;
+    $("mode").textContent = "Temporary fallback";
+  } else if (next?.drainStatus?.phase === "active") {
+    $("mode").textContent = "Drain";
+    $("next-detail").textContent =
+      "Uses to 0%, switches away, resets, then returns.";
+  }
+  $("next-detail").hidden =
+    !drainAccount && next?.drainStatus?.phase !== "active";
   const ready = choices.length;
   $("ready").textContent = ready;
   $("account-count").textContent =
@@ -578,6 +627,8 @@ function renderState(data) {
       moveAccount,
       selectForNewRequests,
       toggleRecurring,
+      toggleDrain,
+      drainSaving,
       openReset,
       selectingName,
       recurringSaving,
@@ -805,7 +856,7 @@ async function update() {
       connectionLost = true;
       document
         .querySelectorAll(
-          "#switch-account-select,#switch-account,#wire-codex,#free-sol-routing,.select-account,.recurring-button,.move-button,.reset-button",
+          "#switch-account-select,#switch-account,#wire-codex,#free-sol-routing,.select-account,.recurring-button,.drain-button,.move-button,.reset-button",
         )
         .forEach((button) => {
           button.disabled = true;

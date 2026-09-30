@@ -10,3 +10,7 @@ Guidance adapted from:
 - [Taste Skill](https://www.tasteskill.dev/docs), [pinned source](https://github.com/Leonxlnx/taste-skill/tree/ce26fc25c0e5e8cab638f883de62d9a86ee5e45b/skills): redesign audit, minimalist surfaces, spacing, and interaction feedback. Marketing hero and scroll-pinning prescriptions were omitted for this utility.
 
 Artwork and icons are original SVG geometry. The README screenshot contains synthetic preview accounts, not user accounts.
+
+## Drain controls
+
+Three compact account actions: select, recurring, Drain. Drain is a persistent, per-account toggle; armed is distinct from active. A temporary fallback banner names the account being reset and explains the return. Waiting, resetting, paused and depleted states are visible on the card; full recovery guidance lives in Details. Account email is available in Details and the identity tooltip. Updates preserve card nodes, expanded details, keyboard focus and viewport. Motion respects reduced-motion preferences.

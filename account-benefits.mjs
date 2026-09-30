@@ -65,7 +65,7 @@ function normalize(data) {
   };
 }
 
-// Resets require explicit manual confirmation. The durable journal preserves
+// Resets require manual confirmation or an explicitly enabled Drain toggle. The durable journal preserves
 // the same credit and idempotency key for an unconfirmed attempt across restarts.
 export class AccountBenefits {
   constructor(account, root, writeJson) {
@@ -160,7 +160,7 @@ export class AccountBenefits {
     });
     return this.refreshing;
   }
-  consume(creditId) {
+  consume(creditId, options = {}) {
     if (
       typeof creditId !== "string" ||
       !creditId.trim() ||
@@ -176,13 +176,13 @@ export class AccountBenefits {
         );
       return this.consuming.promise;
     }
-    const promise = this.redeem(creditId).finally(() => {
+    const promise = this.redeem(creditId, options).finally(() => {
       this.consuming = null;
     });
     this.consuming = { creditId, promise };
     return promise;
   }
-  async redeem(creditId) {
+  async redeem(creditId, options) {
     await this.ready;
     if (this.loadError) throw new Error(this.loadError);
     await this.account.load();
@@ -217,11 +217,13 @@ export class AccountBenefits {
       };
       this.journal.attempts.push(attempt);
     }
-    return this.executeAttempt(attempt);
+    return this.executeAttempt(attempt, options);
   }
-  async executeAttempt(attempt) {
+  async executeAttempt(attempt, { guard } = {}) {
+    if (guard && !guard()) throw new Error("Automatic reset cancelled.");
     // Persist before sending, including retries after a failed write. Unknown outcomes keep the same key across restarts.
     await this.writeJson(this.path, this.journal);
+    if (guard && !guard()) throw new Error("Automatic reset cancelled.");
     let outcome;
     try {
       const data = await this.request({

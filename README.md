@@ -1,6 +1,6 @@
 # Account Router
 
-A local Windows account switcher for **Codex**. Minimal dashboard, usage meters, account priority, recurring use, and manual saved resets.
+A local Windows account switcher for **Codex**. Minimal dashboard, usage meters, account priority, recurring use, and saved resets.
 
 ![Dashboard](docs/dashboard.jpg)
 
@@ -15,15 +15,24 @@ Keep Account Router running while using Codex. Closing its window leaves it in t
 
 ## Controls
 
-| Control | Effect |
-| --- | --- |
-| Use account | Changes new requests; active requests finish where they started. |
-| Drag / arrows | Sets fallback priority, independent of your current selection. |
-| Recurring | Highest-priority ready recurring account takes over new requests. |
-| Refresh | Reads usage, plan information, and saved resets. |
+| Control             | Effect                                                                        |
+| ------------------- | ----------------------------------------------------------------------------- |
+| Use account         | Changes new requests; active requests finish where they started.              |
+| Drag / arrows       | Sets fallback priority, independent of your current selection.                |
+| Drain               | When selected: use to 0%, switch away, use a saved reset, then return.        |
+| Recurring           | Highest-priority ready recurring account takes over new requests.             |
+| Refresh             | Reads usage, plan information, and saved resets.                              |
 | Details → Use reset | Selects the earliest supported, unexpired reset first. Confirmation required. |
 
-Unknown or exhausted accounts cannot be selected. Default cutoff: **1% remaining**. No reset is spent automatically. Plan expiry appears when OpenAI reports it. Model access depends on the account; experimental Sol-on-Free routing is **off** in new installs.
+Unknown or exhausted accounts cannot be selected. Default cutoff: **1% remaining**. **Drain is off by default.** Enabling it authorizes automatic saved resets for that account. Plan expiry appears when OpenAI reports it. Model access depends on the account; experimental Sol-on-Free routing is **off** in new installs.
+
+### Drain
+
+Enable **Drain** on an account, then select it (or let normal routing select it). It takes precedence over recurring and model routing without changing priority.
+
+**0% → next ready account → earliest-expiring reset → return after confirmed recovery.** Repeat until no usable resets remain, then continue normal routing. Active streams finish on their original account before its reset. New requests use fallback accounts immediately; if none are ready, they receive an unavailable response and can retry.
+
+A newer manual selection or disabling Drain cancels the automatic return. An already-submitted reset can still complete. Failed, unconfirmed, or interrupted reset cycles pause Drain instead of spending another credit; check **Details**, retry the same pending reset if needed, then toggle Drain off/on to re-arm. Existing response IDs remain tied to their original account.
 
 ## Local data
 
@@ -42,7 +51,7 @@ npm start
 npm run build:win
 ```
 
-Installer: `dist/Account-Router-1.0.0-Setup.exe`. `npm run preview` opens an isolated fixture at `http://127.0.0.1:18892/dashboard`; it uses synthetic accounts and never calls OpenAI.
+Installer: `dist/Account-Router-1.1.0-Setup.exe`. `npm run preview` opens an isolated fixture at `http://127.0.0.1:18892/dashboard`; it uses synthetic accounts and never calls OpenAI.
 
 To reuse an existing router directory, launch `"Account Router.exe" --data-dir "C:\path\to\router"`. Run only one router per account store. Never commit `accounts`, `.runtime`, or `router.config.json`.
 

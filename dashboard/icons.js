@@ -5,6 +5,7 @@ const paths = {
   close: "M6 6l12 12 M18 6L6 18",
   up: "M6 14l6-6 6 6",
   down: "M6 10l6 6 6-6",
+  drain: "M7 4h10v5l-5 5-5-5z M12 14v6 M8 17l4 4 4-4",
   repeat: "M4 9h15l-3-3 M20 15H5l3 3",
   check: "M5 12l4 4L19 6",
   theme: "M12 3a9 9 0 1 0 0 18V3z",

@@ -452,19 +452,22 @@ select {
 .recurring-row {
   display: flex;
 }
-.recurring-button {
+.recurring-button,
+.drain-button {
   font-size: 12px;
   min-height: 36px;
   background: transparent;
   border: 1px solid var(--line);
   padding: 8px 12px;
 }
-.recurring-button[aria-pressed="true"] {
+.recurring-button[aria-pressed="true"],
+.drain-button[aria-pressed="true"] {
   background: var(--accent-soft);
   color: var(--accent);
   border-color: var(--accent);
 }
-.recurring-button .icon {
+.recurring-button .icon,
+.drain-button .icon {
   width: 16px;
 }
 .usage-grid {
@@ -928,4 +931,94 @@ dialog select {
 }
 .order-controls {
   z-index: 1;
+}
+
+/* Keep the three actions balanced and the selected state readable. */
+.card-actions {
+  gap: 6px;
+}
+.card-actions > button,
+.card-actions .recurring-button {
+  white-space: nowrap;
+  padding-inline: 10px;
+}
+.select-account.selected-account:disabled {
+  opacity: 1;
+  border: 1px solid transparent;
+}
+.account-email {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  margin-bottom: 12px;
+}
+.drain-status {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11px;
+  color: var(--muted);
+  margin: -6px 0 14px;
+}
+.drain-status .icon {
+  width: 14px;
+  height: 14px;
+}
+.drain-status[data-phase="active"],
+.drain-status[data-phase="resetting"] {
+  color: var(--accent);
+}
+.drain-status[data-phase="resetting"] .icon {
+  animation: spin 2s linear infinite;
+}
+.drain-help {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .drain-status .icon {
+    animation: none;
+  }
+}
+
+.drain-summary {
+  color: var(--accent);
+  font-size: 12px;
+  margin-top: 10px;
+  max-width: 560px;
+}
+.notice:not([hidden]) {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+.notice {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: max-content;
+  max-width: min(540px, calc(100vw - 40px));
+  margin: 0;
+  z-index: 30;
+  background: var(--raised);
+  border: 1px solid var(--line);
+  box-shadow: 0 8px 40px #0003;
+}
+.notice-close {
+  background: none;
+  border: 0;
+  padding: 4px;
+  min-height: 28px;
+  min-width: 28px;
+  flex: none;
+}
+.notice-close .icon {
+  width: 16px;
 }

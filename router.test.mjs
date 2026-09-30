@@ -95,6 +95,7 @@ async function fixture(
       body: JSON.stringify(body),
     });
   t.after(async () => {
+    await router.drainUse.stop();
     await router.recurring.stop();
     router.server.closeAllConnections();
     await new Promise((r) => router.server.close(r));
@@ -2404,4 +2405,242 @@ test("legacy automatic jobs never resume; pending reset history is retained for 
     await restored.drain();
     await restored.flushed();
   }
+});
+
+test("Drain routes fallback traffic immediately, waits for old streams, then restores ahead of recurring", async (t) => {
+  const f = await goluFixture(t, { held: true });
+  await f.post("accounts/drain", { name: "account-4", enabled: true });
+  await f.post("accounts/recurring", { name: "a", enabled: true });
+  assert.equal(f.router.snapshot().selectedAccount, "account-4");
+  const stream = await f.send();
+  await until(() => f.router.snapshot().selectedAccount === "a");
+  assert.equal(f.router.snapshot().accounts[1].drainStatus.phase, "waiting");
+  const fallback = await Promise.all(Array.from({ length: 5 }, () => f.send()));
+  for (const response of fallback) {
+    assert.equal(response.headers.get("x-local-router-account"), "a");
+    await response.text();
+  }
+  assert.equal(f.redemptions.length, 0);
+  const manual = await f.post("accounts/use-reset", {
+    name: "account-4",
+    creditId: "earliest",
+    confirmed: true,
+  });
+  assert.notEqual(manual.status, 200);
+  f.finish();
+  assert.match(await stream.text(), /response.completed/);
+  await until(() => !f.router.drainUse.job);
+  assert.equal(f.redemptions.length, 1);
+  assert.equal(f.redemptions[0].credit_id, "earliest");
+  assert.equal(f.router.snapshot().selectedAccount, "account-4");
+  assert.equal(f.router.snapshot().accounts[1].drainStatus.phase, "active");
+});
+
+test("Drain repeats earliest-expiry resets then resumes usual routing when depleted", async (t) => {
+  const f = await goluFixture(t);
+  await f.post("accounts/drain", { name: "account-4", enabled: true });
+  for (const credit of ["earliest", "later", "never"]) {
+    f.exhaust();
+    f.router.drainUse.inspect();
+    await until(() => !f.router.drainUse.job);
+    assert.equal(f.redemptions.at(-1).credit_id, credit);
+    assert.equal(f.router.snapshot().selectedAccount, "account-4");
+  }
+  f.exhaust();
+  f.router.drainUse.inspect();
+  await until(
+    () => !f.router.drainUse.job && f.router.snapshot().selectedAccount === "a",
+  );
+  assert.equal(f.redemptions.length, 3);
+  assert.equal(f.router.snapshot().accounts[1].drainStatus.phase, "depleted");
+  const saved = JSON.parse(
+    await readFile(join(f.root, "router.config.json"), "utf8"),
+  );
+  assert.equal(saved.accounts[1].drainEnabled, true);
+  assert.deepEqual(
+    saved.accounts.map((a) => a.name),
+    ["a", "account-4", "b"],
+  );
+});
+
+test("Arming Drain never selects or consumes an unselected exhausted account", async (t) => {
+  const f = await goluFixture(t);
+  await f.post("accounts/select", { name: "b" });
+  f.exhaust();
+  await f.post("accounts/drain", { name: "account-4", enabled: true });
+  assert.equal(f.router.snapshot().selectedAccount, "b");
+  assert.equal(f.router.snapshot().accounts[1].drainStatus.phase, "armed");
+  assert.equal(f.redemptions.length, 0);
+  assert.equal(
+    (await f.post("accounts/drain", { name: "account-4", enabled: "true" }))
+      .status,
+    400,
+  );
+});
+
+test("Manual selection cancels automatic return and an unsent Drain reset", async (t) => {
+  const f = await goluFixture(t, { held: true });
+  await f.post("accounts/drain", { name: "account-4", enabled: true });
+  const response = await f.send();
+  await until(() => !!f.router.drainUse.job);
+  await f.post("accounts/select", { name: "b" });
+  f.finish();
+  await response.text();
+  await until(() => !f.router.drainUse.job);
+  assert.equal(f.redemptions.length, 0);
+  assert.equal(f.router.snapshot().selectedAccount, "b");
+});
+
+test("Unconfirmed Drain reset pauses durably without spending another credit", async (t) => {
+  const f = await goluFixture(t, { failFirst: true });
+  await f.post("accounts/drain", { name: "account-4", enabled: true });
+  f.exhaust();
+  f.router.drainUse.inspect();
+  await until(() => !f.router.drainUse.job);
+  assert.equal(f.redemptions.length, 1);
+  assert.equal(f.router.snapshot().selectedAccount, "a");
+  assert.equal(f.router.snapshot().accounts[1].drainStatus.phase, "paused");
+  await f.router.flushed();
+  const restart = await createRouter(f.config, {
+    root: f.root,
+    key: KEY,
+    fetcher: f.handler,
+  });
+  await restart.recurring.stop();
+  restart.drainUse.inspect();
+  assert.equal(restart.snapshot().accounts[1].drainStatus.phase, "paused");
+  assert.equal(restart.accounts[1].benefits.view().pendingCreditId, "earliest");
+  assert.equal(f.redemptions.length, 1);
+  await restart.drainUse.stop();
+  await restart.flushed();
+});
+
+test("Drain overrides the normal 1% cutoff only when enabled", async (t) => {
+  const f = await goluFixture(t);
+  const a = f.router.accounts[1];
+  a.switchAtRemainingPercent = 1;
+  a.usage.primary.usedPercent = 99.5;
+  assert.equal(accountPolicy(a).atThreshold, true);
+  await f.post("accounts/drain", { name: a.name, enabled: true });
+  assert.equal(accountPolicy(a).atThreshold, false);
+  assert.equal(f.router.snapshot().selectedAccount, a.name);
+  assert.equal(f.redemptions.length, 0);
+  await f.post("accounts/drain", { name: a.name, enabled: false });
+  assert.equal(accountPolicy(a).atThreshold, true);
+});
+
+test("Turning Drain off during an active stream cancels its reset", async (t) => {
+  const f = await goluFixture(t, { held: true });
+  await f.post("accounts/drain", { name: "account-4", enabled: true });
+  const response = await f.send();
+  await until(() => !!f.router.drainUse.job);
+  await f.post("accounts/drain", { name: "account-4", enabled: false });
+  f.finish();
+  await response.text();
+  await until(() => !f.router.drainUse.job);
+  assert.equal(f.redemptions.length, 0);
+  assert.equal(f.router.snapshot().selectedAccount, "a");
+});
+
+test("Manual selection during a submitted reset keeps the newer account selected", async (t) => {
+  const f = await goluFixture(t);
+  const a = f.router.accounts[1],
+    original = a.fetcher;
+  let release,
+    submitted = false;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  a.fetcher = async (url, options) => {
+    if (url.endsWith("/consume")) {
+      submitted = true;
+      await gate;
+    }
+    return original(url, options);
+  };
+  await f.post("accounts/drain", { name: a.name, enabled: true });
+  f.exhaust();
+  f.router.drainUse.inspect();
+  await until(() => submitted);
+  await f.post("accounts/select", { name: "b" });
+  release();
+  await until(() => !f.router.drainUse.job);
+  assert.equal(f.redemptions.length, 1);
+  assert.equal(f.router.snapshot().selectedAccount, "b");
+  assert.equal(f.router.snapshot().accounts[1].drainStatus.phase, "paused");
+});
+
+test("A reset that leaves zero usage never burns the next credit", async (t) => {
+  const f = await goluFixture(t);
+  const a = f.router.accounts[1],
+    original = a.fetcher;
+  a.fetcher = async (url, options) => {
+    const response = await original(url, options);
+    if (url.endsWith("/consume")) f.exhaust();
+    return response;
+  };
+  await f.post("accounts/drain", { name: a.name, enabled: true });
+  f.exhaust();
+  f.router.drainUse.inspect();
+  await until(() => !f.router.drainUse.job);
+  for (let i = 0; i < 5; i++) f.router.drainUse.inspect();
+  assert.equal(f.redemptions.length, 1);
+  assert.equal(f.router.snapshot().selectedAccount, "a");
+  assert.equal(f.router.snapshot().accounts[1].drainStatus.phase, "paused");
+});
+
+test("Drain takes precedence over Sol-on-Free routing without changing account priority", async (t) => {
+  const f = await goluFixture(t);
+  f.router.accounts[0].profile.plan = "free";
+  await f.post("settings/free-sol", { enabled: true });
+  await f.post("accounts/drain", { name: "account-4", enabled: true });
+  const response = await f.send({
+    model: "gpt-6-sol",
+    input: [],
+    stream: true,
+  });
+  assert.equal(response.headers.get("x-local-router-account"), "account-4");
+  assert.equal(response.headers.get("x-local-router-route"), "drain");
+  await response.text();
+  assert.deepEqual(
+    f.router.accounts.map((a) => a.name),
+    ["a", "account-4", "b"],
+  );
+});
+
+test("Drain can reset and return when no fallback account is ready", async (t) => {
+  const f = await goluFixture(t, { held: true });
+  await f.post("accounts/drain", { name: "account-4", enabled: true });
+  for (const a of f.router.accounts.filter((a) => a.name !== "account-4")) {
+    a.usage = {
+      primary: {
+        usedPercent: 100,
+        resetsAt: Date.now() / 1000 + 18000,
+        windowMinutes: 300,
+      },
+    };
+    a.usageUpdatedAt = a.lastUsageAttempt = Date.now();
+  }
+  const stream = await f.send();
+  await until(() => f.router.snapshot().selectedAccount === null);
+  const unavailable = await f.send();
+  assert.equal(unavailable.status, 429);
+  await unavailable.text();
+  f.finish();
+  await stream.text();
+  await until(() => !f.router.drainUse.job);
+  assert.equal(f.router.snapshot().selectedAccount, "account-4");
+  assert.equal(f.redemptions.length, 1);
+});
+
+test("Shutdown cancels a waiting Drain reset without interrupting its active stream", async (t) => {
+  const f = await goluFixture(t, { held: true });
+  await f.post("accounts/drain", { name: "account-4", enabled: true });
+  const stream = await f.send();
+  await until(() => !!f.router.drainUse.job);
+  const stopped = f.router.drain();
+  f.finish();
+  assert.match(await stream.text(), /response.completed/);
+  await stopped;
+  assert.equal(f.redemptions.length, 0);
 });
