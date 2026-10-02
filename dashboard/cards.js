@@ -14,6 +14,8 @@ export function accountCards(data, ctx) {
     selectForNewRequests,
     reauthenticate,
     toggleRecurring,
+    toggleAccountEnabled,
+    enabledSaving,
     toggleDrain,
     drainSaving,
     openReset,
@@ -27,8 +29,11 @@ export function accountCards(data, ctx) {
       : sol?.routes || [],
     cards = [];
   for (const [index, a] of data.accounts.entries()) {
-    const isNext = a.name === (data.selectedAccount ?? data.nextAccount);
+    const enabled = a.enabled !== false;
+    const isNext =
+      enabled && a.name === (data.selectedAccount ?? data.nextAccount);
     const card = elem("article", "account-card" + (isNext ? " next" : ""));
+    if (!enabled) card.classList.add("account-off");
     const accountSolRoutes = sol?.enabled
         ? solRoutes.filter((r) => r.account === a.name)
         : [],
@@ -38,6 +43,22 @@ export function accountCards(data, ctx) {
     card.dataset.account = a.name;
     card.setAttribute("aria-label", `${index + 1}. ${name(a)}`);
     const controls = elem("div", "order-controls");
+    const enableButton = elem("button", "account-toggle");
+    enableButton.type = "button";
+    enableButton.id = `enabled-${a.name}`;
+    enableButton.setAttribute("role", "switch");
+    enableButton.setAttribute("aria-checked", String(enabled));
+    enableButton.setAttribute(
+      "aria-label",
+      `Account enabled for ${name(a)} (${a.profile?.email || a.name})`,
+    );
+    enableButton.title = enabled
+      ? "Turn off this account. Active requests finish; new requests use other accounts."
+      : "Turn on this account. Its saved priority and settings are retained.";
+    enableButton.disabled = !data.canSelect || enabledSaving.has(a.name);
+    enableButton.append(elem("span", "toggle-track"));
+    enableButton.addEventListener("click", () => toggleAccountEnabled(a.name));
+    controls.append(enableButton);
     const handle = elem("span", "drag-handle");
     handle.append(icon("grip"));
     handle.title = "Drag to change account order";
@@ -173,7 +194,8 @@ export function accountCards(data, ctx) {
       const servingCurrent =
         isNext ||
         hasSolRoute ||
-        (sol?.enabled &&
+        (enabled &&
+          sol?.enabled &&
           !sol.account &&
           a.activeModels?.some((m) => m.route === "free-sol"));
       const badge = elem(
@@ -201,7 +223,8 @@ export function accountCards(data, ctx) {
               : "6.1 Sol route",
         ),
       );
-    if (!a.activeRequests && !isNext && !hasSolRoute)
+    if (!enabled) badges.append(elem("span", "badge off-badge", "Off"));
+    else if (!a.activeRequests && !isNext && !hasSolRoute)
       badges.append(
         elem(
           "span",
@@ -247,16 +270,19 @@ export function accountCards(data, ctx) {
     selectButton.addEventListener("click", () =>
       needsSignIn ? reauthenticate(a.name) : selectForNewRequests(a.name),
     );
-    selectButton.title = !a.signedIn
-      ? "Renew this account sign-in first."
-      : !canChoose(a)
-        ? "Available usage has not been confirmed. Refresh limits after its reset."
-        : isNext
-          ? "Already selected for new requests."
-          : "Select for new requests. Ready recurring accounts take precedence; Sol tries Free accounts first when enabled.";
+    selectButton.title = !enabled
+      ? "Turn on this account to use it."
+      : !a.signedIn
+        ? "Renew this account sign-in first."
+        : !canChoose(a)
+          ? "Available usage has not been confirmed. Refresh limits after its reset."
+          : isNext
+            ? "Already selected for new requests."
+            : "Select for new requests. Ready recurring accounts take precedence; Sol tries Free accounts first when enabled.";
     if (!canChoose(a) && !isNext && selectingName !== a.name)
-      selectButton.textContent =
-        a.reason === "identity-changed"
+      selectButton.textContent = !enabled
+        ? "Account off"
+        : a.reason === "identity-changed"
           ? "Account identity changed"
           : !a.signedIn || a.reason === "sign-in-required"
             ? "Sign-in needed"
@@ -305,13 +331,15 @@ export function accountCards(data, ctx) {
     const recurringText = elem(
       "span",
       "recurring-status",
-      !a.recurringUse
-        ? "Off"
-        : a.recurringStatus === "waiting"
-          ? "On · waiting for usage to reset"
-          : a.recurringStatus === "ready"
-            ? "On · ready, uses account priority"
-            : "On · refresh limits to confirm availability",
+      !enabled
+        ? "Account off · recurring selection paused"
+        : !a.recurringUse
+          ? "Off"
+          : a.recurringStatus === "waiting"
+            ? "On · waiting for usage to reset"
+            : a.recurringStatus === "ready"
+              ? "On · ready, uses account priority"
+              : "On · refresh limits to confirm availability",
     );
     recurringText.id = `recurring-status-${a.name}`;
     recurringButton.setAttribute("aria-describedby", recurringText.id);
@@ -347,7 +375,7 @@ export function accountCards(data, ctx) {
     else usage.append(usageWindow("primary", null));
     card.append(cardActions, usage);
     const drainState = a.drainStatus || { phase: "off" };
-    if (a.drainEnabled) {
+    if (enabled && a.drainEnabled) {
       const labels = {
         active: "Drain active",
         armed: "Drain armed",

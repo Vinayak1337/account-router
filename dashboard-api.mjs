@@ -41,6 +41,7 @@ export function createDashboard({
   commitAccounts,
   reorderAccounts,
   selectAccount,
+  setAccountEnabled,
   setRecurringUse,
   setDrainUse,
   resetBusy,
@@ -419,6 +420,9 @@ export function createDashboard({
       } else if (url.pathname === "/dashboard/api/accounts/select") {
         await selectAccount(input.name);
         reply(res, 200, { ...(await status()), requestedAccount: input.name });
+      } else if (url.pathname === "/dashboard/api/accounts/enabled") {
+        await setAccountEnabled(input.name, input.enabled);
+        reply(res, 200, await status());
       } else if (url.pathname === "/dashboard/api/accounts/drain") {
         await setDrainUse(input.name, input.enabled);
         reply(res, 200, await status());

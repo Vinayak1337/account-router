@@ -52,6 +52,7 @@ let selectingName = null,
 let switchChoiceTouched = false;
 const recurringSaving = new Set();
 const drainSaving = new Set();
+const enabledSaving = new Set();
 let freeSolSaving = false,
   wireBusy = false,
   wireDesired = null;
@@ -80,6 +81,7 @@ const usableReset = (c) =>
   c.expiryKnown &&
   (!c.expiresAt || c.expiresAt * 1000 > Date.now());
 const canChoose = (a) =>
+  a?.enabled !== false &&
   !!a?.signedIn &&
   Number.isFinite(a.policy?.remainingPercent) &&
   a.policy.remainingPercent > a.policy.switchAtRemainingPercent &&
@@ -280,6 +282,28 @@ async function toggleRecurring(accountName) {
     );
   } catch (error) {
     recurringSaving.delete(accountName);
+    notice(error.message);
+    await update();
+  }
+}
+async function toggleAccountEnabled(accountName) {
+  const account = state?.accounts.find((a) => a.name === accountName);
+  if (!account || !state.canSelect || enabledSaving.has(accountName)) return;
+  const enabled = account.enabled === false;
+  enabledSaving.add(accountName);
+  render(state);
+  notice("");
+  try {
+    const data = await api("accounts/enabled", { name: accountName, enabled });
+    enabledSaving.delete(accountName);
+    render(data);
+    notice(
+      enabled
+        ? `${name(account)} turned on.`
+        : `${name(account)} turned off. Active requests will finish.`,
+    );
+  } catch (error) {
+    enabledSaving.delete(accountName);
     notice(error.message);
     await update();
   }
@@ -560,7 +584,9 @@ function renderState(data) {
     ? "Checking availability. The next ready account is chosen from Priority 1."
     : next
       ? `${sol?.enabled ? "Sol first tries ready Free accounts; other models use this account." : "New requests use this account."}`
-      : "No ready account. Waiting for refreshed limits or another sign-in.";
+      : data.accounts.length && data.accounts.every((a) => a.enabled === false)
+        ? "All accounts are off. Turn an account on to resume."
+        : "No ready account. Waiting for refreshed limits or another sign-in.";
   $("live-status").textContent = active.length
     ? active.map((a) => `${name(a)} · ${a.activeRequests} active`).join(" / ")
     : next && canChoose(next)
@@ -630,6 +656,8 @@ function renderState(data) {
       selectForNewRequests,
       reauthenticate,
       toggleRecurring,
+      toggleAccountEnabled,
+      enabledSaving,
       toggleDrain,
       drainSaving,
       openReset,

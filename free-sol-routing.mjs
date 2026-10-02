@@ -92,7 +92,9 @@ export class FreeSolRouting {
   }
   refreshDue() {
     if (this.work) return this.work;
-    const pool = this.accounts.filter((a) => isFree(a) || !a.profile?.plan);
+    const pool = this.accounts.filter(
+      (a) => a.enabled !== false && (isFree(a) || !a.profile?.plan),
+    );
     this.work = Promise.all(pool.map(this.refresh)).finally(() => {
       this.work = null;
     });

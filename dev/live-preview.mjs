@@ -24,6 +24,7 @@ const actions = new Set(
     "settings/free-sol",
     "codex/wire",
     "accounts/select",
+    "accounts/enabled",
     "accounts/reauth",
     "accounts/drain",
     "accounts/recurring",

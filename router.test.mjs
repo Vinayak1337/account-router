@@ -2143,6 +2143,7 @@ test("invalid configuration and non-object request bodies fail before upstream a
       { name: "b", home: "a" },
     ],
     [{ name: "a", home: "a", switchAtRemainingPercent: -1 }],
+    [{ name: "a", home: "a", enabled: "false" }],
   ]) {
     await assert.rejects(() =>
       createRouter(
@@ -2655,6 +2656,207 @@ async function waitForSignIn(base, cookie) {
   }
   assert.fail("Sign-in did not settle");
 }
+
+test("account off persists through reordering and restart, and all-off requests explain how to resume", async (t) => {
+  const f = await fixture(t, () => ok());
+  const post = await dashboardPost(f);
+  assert.equal(f.router.snapshot().accounts[0].enabled, true);
+  for (const input of [
+    { name: "a", enabled: "false" },
+    { name: "missing", enabled: false },
+  ])
+    assert.equal((await post("accounts/enabled", input)).status, 400);
+  const disabled = await post("accounts/enabled", {
+    name: "a",
+    enabled: false,
+  });
+  assert.equal(disabled.status, 200);
+  assert.equal((await disabled.json()).selectedAccount, "b");
+  assert.equal((await post("accounts/select", { name: "a" })).status, 400);
+  const routed = await f.send();
+  assert.equal(routed.headers.get("x-local-router-account"), "b");
+  await routed.text();
+  await post("accounts/enabled", { name: "b", enabled: false });
+  await post("accounts/order", { names: ["b", "a"] });
+  const before = f.calls.length;
+  const unavailable = await f.send();
+  assert.equal(unavailable.status, 503);
+  assert.equal((await unavailable.json()).error.code, "accounts_disabled");
+  assert.equal(f.calls.length, before);
+  const saved = JSON.parse(
+    await readFile(join(f.root, "router.config.json"), "utf8"),
+  );
+  const restored = await createRouter(saved, {
+    root: f.root,
+    key: KEY,
+    persist: false,
+  });
+  assert.deepEqual(
+    restored.snapshot().accounts.map((a) => [a.name, a.enabled]),
+    [
+      ["b", false],
+      ["a", false],
+    ],
+  );
+  assert.equal(restored.snapshot().selectedAccount, null);
+  await restored.recurring.stop();
+  await restored.drainUse.stop();
+  const resumed = await post("accounts/enabled", { name: "b", enabled: true });
+  assert.equal((await resumed.json()).selectedAccount, "b");
+  const response = await f.send();
+  assert.equal(response.headers.get("x-local-router-account"), "b");
+  await response.text();
+});
+
+test("turning off an active account preserves its stream and rejects new pinned context", async (t) => {
+  let finish;
+  const f = await fixture(t, (_url, options) => {
+    if (options.headers.get("ChatGPT-Account-Id") !== "id-a")
+      return ok("b-response");
+    return new Response(
+      new ReadableStream({
+        start(controller) {
+          const encode = (type) =>
+            new TextEncoder().encode(
+              `data: ${JSON.stringify({ type, response: { id: "held-a" } })}\n\n`,
+            );
+          controller.enqueue(encode("response.created"));
+          finish = () => {
+            controller.enqueue(encode("response.completed"));
+            controller.close();
+          };
+        },
+      }),
+      { headers: { "content-type": "text/event-stream" } },
+    );
+  });
+  const stream = await f.send();
+  const post = await dashboardPost(f);
+  await post("accounts/enabled", { name: "a", enabled: false });
+  assert.equal(f.router.accounts[0].activeRequests, 1);
+  const newRequest = await f.send();
+  assert.equal(newRequest.headers.get("x-local-router-account"), "b");
+  await newRequest.text();
+  const pinned = await f.send({
+    model: "test",
+    previous_response_id: "held-a",
+  });
+  assert.equal(pinned.status, 409);
+  assert.equal((await pinned.json()).error.code, "context_requires_full_input");
+  finish();
+  assert.match(await stream.text(), /response.completed/);
+  assert.deepEqual(
+    f.calls.map((c) => c.account),
+    ["id-a", "id-b"],
+  );
+});
+
+test("disabling during credential preparation reselects before upstream dispatch", async (t) => {
+  const f = await fixture(t, () => ok());
+  let release, entered;
+  const started = new Promise((r) => {
+    entered = r;
+  });
+  const gate = new Promise((r) => {
+    release = r;
+  });
+  const account = f.router.accounts[0],
+    token = account.token.bind(account);
+  account.token = async (...args) => {
+    entered();
+    await gate;
+    return token(...args);
+  };
+  const pending = f.send();
+  await started;
+  const post = await dashboardPost(f);
+  await post("accounts/enabled", { name: "a", enabled: false });
+  release();
+  const response = await pending;
+  assert.equal(response.headers.get("x-local-router-account"), "b");
+  await response.text();
+  assert.deepEqual(
+    f.calls.map((c) => c.account),
+    ["id-b"],
+  );
+});
+
+test("off accounts are excluded from recurring monitoring and Free model priority, retaining both settings", async (t) => {
+  const f = await fixture(
+    t,
+    (url) => (url.endsWith("/usage") ? Response.json(usagePayload()) : ok()),
+    { accountNames: ["a", "b", "c"] },
+  );
+  setPlans(f, ["free", "free", "plus"]);
+  const post = await dashboardPost(f);
+  await post("accounts/recurring", { name: "a", enabled: true });
+  await post("accounts/recurring", { name: "b", enabled: true });
+  await post("accounts/enabled", { name: "a", enabled: false });
+  assert.equal(f.router.snapshot().selectedAccount, "b");
+  const free = await f.send({ model: "gpt-6-sol" });
+  assert.equal(free.headers.get("x-local-router-account"), "b");
+  await free.text();
+  await post("accounts/enabled", { name: "b", enabled: false });
+  for (const account of f.router.accounts.slice(0, 2)) {
+    account.usageUpdatedAt = account.lastUsageAttempt = 0;
+    assert.equal(account.recurringUse, true);
+  }
+  f.calls.length = 0;
+  await f.router.recurring.refreshDue();
+  const fallback = await f.send({ model: "gpt-6-sol" });
+  assert.equal(fallback.headers.get("x-local-router-account"), "c");
+  await fallback.text();
+  assert.deepEqual(
+    f.calls.map((c) => c.account),
+    ["id-c"],
+  );
+  await post("accounts/enabled", { name: "a", enabled: true });
+  assert.equal(f.router.snapshot().selectedAccount, "a");
+  assert.equal(f.router.snapshot().selectionSource, "recurring");
+});
+
+test("account off cancels an unsent Drain reset while its active stream finishes", async (t) => {
+  const f = await goluFixture(t, { held: true });
+  await f.post("accounts/drain", { name: "account-4", enabled: true });
+  const stream = await f.send();
+  await until(() => !!f.router.drainUse.job);
+  await f.post("accounts/enabled", { name: "account-4", enabled: false });
+  assert.equal(f.router.snapshot().selectedAccount, "a");
+  f.finish();
+  assert.match(await stream.text(), /response.completed/);
+  await until(() => !f.router.drainUse.job);
+  assert.equal(f.redemptions.length, 0);
+  assert.equal(f.router.snapshot().accounts[1].drainEnabled, true);
+  assert.equal(f.router.snapshot().accounts[1].drainStatus.phase, "disabled");
+});
+
+test("account off during a submitted Drain reset prevents automatic return", async (t) => {
+  const f = await goluFixture(t);
+  const account = f.router.accounts[1],
+    original = account.fetcher;
+  let release,
+    submitted = false;
+  const gate = new Promise((r) => {
+    release = r;
+  });
+  account.fetcher = async (url, options) => {
+    if (url.endsWith("/consume")) {
+      submitted = true;
+      await gate;
+    }
+    return original(url, options);
+  };
+  await f.post("accounts/drain", { name: account.name, enabled: true });
+  f.exhaust();
+  f.router.drainUse.inspect();
+  await until(() => submitted);
+  await f.post("accounts/enabled", { name: account.name, enabled: false });
+  release();
+  await until(() => !f.router.drainUse.job);
+  assert.equal(f.redemptions.length, 1);
+  assert.equal(f.router.snapshot().selectedAccount, "a");
+  assert.equal(f.router.snapshot().accounts[1].enabled, false);
+});
 
 test("re-sign-in replaces credentials in place, preserves policy and rejects another identity", async (t) => {
   let identity = "id-a";

@@ -15,14 +15,15 @@ Keep Account Router running while using Codex. Closing its window leaves it in t
 
 ## Controls
 
-| Control             | Effect                                                                        |
-| ------------------- | ----------------------------------------------------------------------------- |
-| Use account         | Changes new requests; active requests finish where they started.              |
-| Drag / arrows       | Sets fallback priority, independent of your current selection.                |
-| Drain               | When selected: use to 0%, switch away, use a saved reset, then return.        |
-| Recurring           | Highest-priority ready recurring account takes over new requests.             |
-| Refresh             | Reads usage, plan information, and saved resets.                              |
-| Details → Use reset | Selects the earliest supported, unexpired reset first. Confirmation required. |
+| Control             | Effect                                                                                                                       |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| Account toggle      | Turns an account off for new requests and all automatic routing. Active requests finish; priority and settings are retained. |
+| Use account         | Changes new requests; active requests finish where they started.                                                             |
+| Drag / arrows       | Sets fallback priority, independent of your current selection.                                                               |
+| Drain               | When selected: use to 0%, switch away, use a saved reset, then return.                                                       |
+| Recurring           | Highest-priority ready recurring account takes over new requests.                                                            |
+| Refresh             | Reads usage, plan information, and saved resets.                                                                             |
+| Details → Use reset | Selects the earliest supported, unexpired reset first. Confirmation required.                                                |
 
 Unknown or exhausted accounts cannot be selected. Default cutoff: **1% remaining**. **Drain is off by default.** Enabling it authorizes automatic saved resets for that account. Plan expiry appears when OpenAI reports it. Model access depends on the account; experimental Sol-on-Free routing is **off** in new installs.
 
@@ -51,7 +52,7 @@ npm start
 npm run build:win
 ```
 
-Installer: `dist/Account-Router-1.2.4-Setup.exe`. `npm run preview` opens an isolated fixture at `http://127.0.0.1:18892/dashboard`; it uses synthetic accounts and never calls OpenAI.
+Installer: `dist/Account-Router-1.2.5-Setup.exe`. `npm run preview` opens an isolated fixture at `http://127.0.0.1:18892/dashboard`; it uses synthetic accounts and never calls OpenAI.
 
 To preview frontend edits against the running app without restarting it, run `npm run preview:live` and open `http://127.0.0.1:18893/dashboard`. This browser view uses your real accounts and controls; keep the app running.
 

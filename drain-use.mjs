@@ -63,6 +63,7 @@ export class DrainUse {
   }
   view(account) {
     const state = this.states[account.name];
+    if (account.enabled === false) return { phase: "disabled" };
     if (!account.drainEnabled) return { phase: "off" };
     if (this.loadError) return { phase: "paused", message: this.loadError };
     if (state?.identity && state.identity !== account.accountIdentity)
@@ -80,6 +81,7 @@ export class DrainUse {
     const account = this.accounts.find((a) => a.name === this.selected());
     if (
       !account?.drainEnabled ||
+      account.enabled === false ||
       account.signedIn === false ||
       ["identity-changed", "sign-in-required"].includes(account.reason)
     )
@@ -96,6 +98,12 @@ export class DrainUse {
   manualSelection() {
     if (this.job) this.job.cancelled = true;
     this.pulse();
+  }
+  suspend(account) {
+    if (this.job?.account === account) {
+      this.job.cancelled = true;
+      this.pulse();
+    }
   }
   async configure(account, enabled) {
     if (this.loadError && enabled) throw new Error(this.loadError);
@@ -159,6 +167,7 @@ export class DrainUse {
     return (
       !this.stopping &&
       !job.cancelled &&
+      job.account.enabled !== false &&
       job.account.drainEnabled &&
       job.intent === this.intent() &&
       job.identity === job.account.accountIdentity

@@ -177,6 +177,9 @@ export class Account {
     this.accountId = null;
     this.accountIdentity = spec.accountIdentity || null;
     this.label = spec.label || spec.name;
+    if (spec.enabled !== undefined && typeof spec.enabled !== "boolean")
+      throw new Error("Account enabled must be true or false.");
+    this.enabled = spec.enabled !== false;
     this.switchAtRemainingPercent = spec.switchAtRemainingPercent ?? 1;
     if (
       spec.recurringUse !== undefined &&
@@ -685,6 +688,7 @@ export async function createRouter(
   function eligible(account) {
     return (
       account &&
+      account.enabled &&
       !drainUse?.unavailable(account) &&
       account.signedIn !== false &&
       account.blockedUntil <= Date.now() &&
@@ -752,7 +756,7 @@ export async function createRouter(
     save();
   }
   async function refreshForRouting(account) {
-    if (!persist || account.signedIn === false) return;
+    if (!persist || !account.enabled || account.signedIn === false) return;
     const now = Date.now();
     const crossedReset = Object.values(account.usage || {}).some(
       (w) =>
@@ -922,11 +926,17 @@ export async function createRouter(
   async function selectAccount(name) {
     const account = accounts.find((a) => a.name === name);
     if (!account) throw new Error("Account not found. Refresh the dashboard.");
+    if (!account.enabled)
+      throw new Error("Turn this account on before selecting it.");
     const intent = ++selectionIntent;
     drainUse.manualSelection();
     await account.load();
     account.signedIn = true;
     if (intent !== selectionIntent) return;
+    if (!account.enabled)
+      throw new Error(
+        "This account was turned off. Choose an enabled account.",
+      );
     setSelection(account, "manual");
     await reconcileSelection();
     await saveChain;
@@ -1013,6 +1023,35 @@ export async function createRouter(
     recurring.kick();
     await save();
   }
+  async function setAccountEnabled(name, enabled) {
+    if (typeof enabled !== "boolean")
+      throw new Error("Account enabled must be true or false.");
+    await commitAccounts(() => {
+      const account = accounts.find((a) => a.name === name);
+      if (!account)
+        throw new Error("Account not found. Refresh the dashboard.");
+      return {
+        specs: config.accounts.map((a) =>
+          a.name === name ? { ...a, enabled } : a,
+        ),
+        items: [...accounts],
+        apply: () => {
+          account.enabled = enabled;
+          routingVersion++;
+          if (!enabled) drainUse.suspend(account);
+        },
+      };
+    });
+    record(
+      accounts.find((a) => a.name === name),
+      enabled
+        ? "Account enabled for new requests. Saved priority and settings retained."
+        : "Account turned off. Active requests finish; new requests use enabled accounts.",
+    );
+    await reconcileSelection();
+    recurring.kick();
+    await save();
+  }
   async function setDrainUse(name, enabled) {
     if (typeof enabled !== "boolean")
       throw new Error("Drain must be true or false.");
@@ -1086,6 +1125,7 @@ export async function createRouter(
       inFlight: accounts.reduce((sum, a) => sum + a.activeRequests, 0),
       accounts: accounts.map((a) => ({
         name: a.name,
+        enabled: a.enabled,
         label: a.label,
         profile: a.profile,
         blockedUntil: a.blockedUntil,
@@ -1152,6 +1192,7 @@ export async function createRouter(
     commitAccounts,
     reorderAccounts,
     selectAccount,
+    setAccountEnabled,
     setRecurringUse,
     setDrainUse,
     resetBusy: (account) => drainUse.unavailable(account),
@@ -1316,6 +1357,15 @@ export async function createRouter(
       let forceUsual = false;
       for (;;) {
         if (abort.signal.aborted) throw new Error("Request cancelled.");
+        if (pinned && !pinned.enabled)
+          return json(
+            res,
+            409,
+            errorBody(
+              "context_requires_full_input",
+              "The previous response belongs to an account that is turned off. Send full conversation input to use another account, or enable the original account.",
+            ),
+          );
         let choice;
         if (
           pinned &&
@@ -1394,6 +1444,7 @@ export async function createRouter(
         const account = choice.account;
         if (!account) {
           for (const a of accounts) {
+            if (!a.enabled) continue;
             const p = accountPolicy(a);
             if (a.blockedUntil > Date.now())
               earliest = Math.min(earliest, a.blockedUntil);
@@ -1699,6 +1750,15 @@ export async function createRouter(
           ),
         );
       }
+      if (accounts.length && accounts.every((a) => !a.enabled))
+        return json(
+          res,
+          503,
+          errorBody(
+            "accounts_disabled",
+            "All accounts are turned off. Enable an account to resume requests.",
+          ),
+        );
       return json(
         res,
         503,

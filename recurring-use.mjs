@@ -45,7 +45,11 @@ export class RecurringUse {
   }
   take(excluded = new Set()) {
     // Compare priorities only after concurrent account refreshes settle.
-    if (this.accounts.some((a) => a.recurringUse && a.usageRefreshing))
+    if (
+      this.accounts.some(
+        (a) => a.enabled !== false && a.recurringUse && a.usageRefreshing,
+      )
+    )
       return null;
     return this.accounts.find((a) => !excluded.has(a) && this.ready(a)) || null;
   }
@@ -56,13 +60,15 @@ export class RecurringUse {
     return {};
   }
   view(a) {
-    return !a.recurringUse
-      ? "off"
-      : this.ready(a)
-        ? "ready"
-        : this.exhausted(a)
-          ? "waiting"
-          : "checking";
+    return a.enabled === false
+      ? "disabled"
+      : !a.recurringUse
+        ? "off"
+        : this.ready(a)
+          ? "ready"
+          : this.exhausted(a)
+            ? "waiting"
+            : "checking";
   }
   dueAt(a) {
     const checked = a.lastUsageAttempt || a.usageUpdatedAt || 0;
@@ -86,7 +92,10 @@ export class RecurringUse {
     if (this.refreshWork) return this.refreshWork;
     const due = this.accounts.filter(
       (a) =>
-        a.recurringUse && a.signedIn !== false && this.dueAt(a) <= Date.now(),
+        a.enabled !== false &&
+        a.recurringUse &&
+        a.signedIn !== false &&
+        this.dueAt(a) <= Date.now(),
     );
     if (!due.length) return Promise.resolve();
     this.refreshWork = Promise.all(due.map((a) => a.refreshUsage()))
@@ -97,7 +106,7 @@ export class RecurringUse {
     return this.refreshWork;
   }
   kick() {
-    if (!this.accounts.some((a) => a.recurringUse)) {
+    if (!this.accounts.some((a) => a.enabled !== false && a.recurringUse)) {
       clearTimeout(this.timer);
       this.timer = null;
       return;
@@ -126,7 +135,7 @@ export class RecurringUse {
     clearTimeout(this.timer);
     this.timer = null;
     const monitored = this.accounts.filter(
-      (a) => a.recurringUse && a.signedIn !== false,
+      (a) => a.enabled !== false && a.recurringUse && a.signedIn !== false,
     );
     if (this.stopping || !monitored.length) return;
     const delay = Math.max(
