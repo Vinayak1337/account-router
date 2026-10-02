@@ -11,7 +11,7 @@ const shortDate = (seconds) =>
 export function accountDetails(
   a,
   data,
-  { name, fullDate, ago, usableReset, openReset },
+  { name, fullDate, ago, usableReset, openReset, reauthenticate },
 ) {
   const details = elem("details", "account-details");
   details.dataset.key = "details";
@@ -176,6 +176,20 @@ export function accountDetails(
   updated.prepend(icon("clock"));
   updated.title = `${a.usageSource || "Awaiting a usage reading"}${a.usageUpdatedAt ? " · " + new Date(a.usageUpdatedAt).toLocaleString() : ""}`;
   content.append(updated);
+  const reconnect = elem("button", "reset-button reauth-button", "Re-sign in");
+  reconnect.id = `reauth-${a.name}`;
+  reconnect.type = "button";
+  reconnect.disabled =
+    !data.canReauthenticate ||
+    !!data.draining ||
+    data.loginBusy ||
+    data.login.state === "waiting";
+  reconnect.title = data.canReauthenticate
+    ? "Replace this account’s sign-in. Order and settings stay the same."
+    : "Available after the updated Account Router is next launched.";
+  reconnect.setAttribute("aria-label", `Re-sign in to ${name(a)}`);
+  reconnect.addEventListener("click", () => reauthenticate(a.name));
+  content.append(reconnect);
   details.append(content);
   return details;
 }

@@ -628,6 +628,7 @@ function renderState(data) {
       usableReset,
       moveAccount,
       selectForNewRequests,
+      reauthenticate,
       toggleRecurring,
       toggleDrain,
       drainSaving,
@@ -828,15 +829,20 @@ $("confirm-reset").addEventListener("click", async () => {
     await update();
   }
 });
+let loginViewState = "idle";
 function renderLogin(login) {
   if (login.state === "idle") return;
+  loginViewState = login.state;
+  if (login.replacing) reauthTarget = login.name;
   $("add-form").hidden = true;
   $("login-progress").hidden = false;
   $("login-title").textContent =
     login.state === "waiting"
       ? "Finish signing in"
       : login.state === "success"
-        ? "Account connected"
+        ? login.replacing
+          ? "Sign-in renewed"
+          : "Account connected"
         : "Sign-in needs attention";
   $("login-message").textContent =
     login.message || "Opening the official sign-in page…";
@@ -845,6 +851,33 @@ function renderLogin(login) {
   $("cancel-login").hidden = login.state !== "waiting";
   $("try-again").hidden = login.state === "waiting";
   $("try-again").textContent = login.state === "success" ? "Done" : "Try again";
+}
+let reauthTarget = null;
+let reauthStarting = false;
+async function reauthenticate(accountName) {
+  if (reauthStarting) return;
+  if (!state?.canReauthenticate) {
+    notice(
+      "Re-sign-in becomes available when the updated Account Router is next launched.",
+    );
+    return;
+  }
+  reauthStarting = true;
+  reauthTarget = accountName;
+  addWasSubmitted = true;
+  $("dialog-title").textContent = "Re-sign in";
+  renderLogin({
+    state: "waiting",
+    message: "Opening the official sign-in page…",
+  });
+  if (!$("add-dialog").open) $("add-dialog").showModal();
+  try {
+    render(await api("accounts/reauth", { name: accountName }));
+  } catch (error) {
+    renderLogin({ state: "error", message: error.message });
+  } finally {
+    reauthStarting = false;
+  }
 }
 async function update() {
   if (draggedName || ordering) return;
@@ -900,6 +933,8 @@ $("refresh").addEventListener("click", async () => {
   }
 });
 $("add").addEventListener("click", () => {
+  reauthTarget = null;
+  $("dialog-title").textContent = "Add account";
   addWasSubmitted = false;
   $("account-label").value = "";
   $("add-form").hidden = false;
@@ -931,7 +966,8 @@ $("cancel-login").addEventListener("click", async () => {
   }
 });
 $("try-again").addEventListener("click", () => {
-  if (state?.login.state === "success") $("add-dialog").close();
+  if (loginViewState === "success") $("add-dialog").close();
+  else if (reauthTarget) reauthenticate(reauthTarget);
   else {
     $("add-form").hidden = false;
     $("login-progress").hidden = true;

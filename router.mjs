@@ -171,6 +171,8 @@ export class Account {
     this.blockedUntil = 0;
     this.reason = null;
     this.refreshing = null;
+    this.credentialWrites = Promise.resolve();
+    this.authRevision = 0;
     this.usage = {};
     this.accountId = null;
     this.accountIdentity = spec.accountIdentity || null;
@@ -257,7 +259,52 @@ export class Account {
     });
     return this.refreshing;
   }
-  async refresh(data) {
+  writeCredentials(work) {
+    const pending = this.credentialWrites.then(work);
+    this.credentialWrites = pending.catch(() => {});
+    return pending;
+  }
+  replaceCredentials(data) {
+    return this.writeCredentials(async () => {
+      const t = data?.tokens;
+      const claimedId = claims(t?.access_token || "")[
+        "https://api.openai.com/auth"
+      ]?.chatgpt_account_id;
+      if (
+        ![t?.access_token, t?.refresh_token, t?.account_id].every(
+          (v) => typeof v === "string" && v.length > 0,
+        ) ||
+        (claimedId && claimedId !== t.account_id) ||
+        !this.accountIdentity ||
+        identityHash(t.account_id) !== this.accountIdentity
+      )
+        throw new Error(
+          "Sign in with the same account to replace this session.",
+        );
+      await atomicJson(this.path, data);
+      this.authRevision++;
+      this.usageRevision++;
+      this.profile = {};
+      await this.load();
+      this.signedIn = true;
+      if (["sign-in-required", "identity-changed"].includes(this.reason))
+        this.reason = null;
+      this.usageError = null;
+    });
+  }
+  refresh(data) {
+    return this.writeCredentials(async () => {
+      const current = await this.load();
+      // A completed re-sign-in wins over an older token refresh.
+      if (
+        current.tokens.access_token !== data.tokens.access_token ||
+        current.tokens.refresh_token !== data.tokens.refresh_token
+      )
+        return current.tokens;
+      return this.refreshCredentials(data);
+    });
+  }
+  async refreshCredentials(data) {
     const r = await this.fetcher(TOKEN_ENDPOINT, {
       method: "POST",
       redirect: "error",
@@ -353,6 +400,7 @@ export class Account {
   }
   async fetchUsage() {
     const revision = this.usageRevision;
+    const authRevision = this.authRevision;
     try {
       let tokens = await this.token();
       const send = () =>
@@ -376,6 +424,7 @@ export class Account {
         throw new Error(`Usage endpoint returned HTTP ${response.status}.`);
       }
       const data = await response.json();
+      if (authRevision !== this.authRevision) return false;
       if (
         !data ||
         typeof data !== "object" ||
@@ -443,6 +492,7 @@ export class Account {
       this.onUsageChange?.();
       return true;
     } catch (error) {
+      if (authRevision !== this.authRevision) return false;
       this.usageError = error.message.startsWith("Usage ")
         ? error.message
         : "Could not refresh usage. Check the account sign-in or connection.";
@@ -1355,10 +1405,14 @@ export async function createRouter(
         }
         if (abort.signal.aborted) throw new Error("Request cancelled.");
         let tokens;
+        let authRevision = account.authRevision;
         try {
           tokens = await account.token();
         } catch {
-          if (account.reason !== "identity-changed")
+          if (
+            authRevision === account.authRevision &&
+            account.reason !== "identity-changed"
+          )
             account.reason = "sign-in-required";
           excluded.add(account);
           if (pinned) break;
@@ -1423,9 +1477,11 @@ export async function createRouter(
         if (response.status === 401) {
           await response.body?.cancel();
           try {
+            authRevision = account.authRevision;
             tokens = await account.token(true, tokens.access_token);
           } catch {
-            account.reason = "sign-in-required";
+            if (authRevision === account.authRevision)
+              account.reason = "sign-in-required";
             excluded.add(account);
             track(null);
             if (pinned) break;
@@ -1496,7 +1552,8 @@ export async function createRouter(
               continue;
             }
           }
-          if (response.status === 401) account.reason = "sign-in-required";
+          if (response.status === 401 && authRevision === account.authRevision)
+            account.reason = "sign-in-required";
           res.writeHead(response.status, {
             "content-type":
               response.headers.get("content-type") || "application/json",

@@ -36,7 +36,7 @@ A newer manual selection or disabling Drain cancels the automatic return. An alr
 
 ## Local data
 
-Sign-ins and settings stay in `%LOCALAPPDATA%\Account Router`. Windows access is restricted to your user and SYSTEM. The proxy binds to `127.0.0.1`; the dashboard never receives tokens. No cloud dashboard, analytics, or prompt logging.
+Sign-ins and settings stay in `%USERPROFILE%\.account-router`. On upgrade, the app copies data from `%USERPROFILE%\AppData\Local\Account Router` once. Windows access is restricted to your user and SYSTEM. The proxy binds to `127.0.0.1`; the dashboard never receives tokens. No cloud dashboard, analytics, or prompt logging.
 
 This is an unofficial Codex utility. It does not modify the ChatGPT website or turn subscriptions into API credits. OpenAI sign-in and service endpoints are required and may change. The installer is unsigned; Windows may show a publisher warning.
 
@@ -51,7 +51,7 @@ npm start
 npm run build:win
 ```
 
-Installer: `dist/Account-Router-1.2.1-Setup.exe`. `npm run preview` opens an isolated fixture at `http://127.0.0.1:18892/dashboard`; it uses synthetic accounts and never calls OpenAI.
+Installer: `dist/Account-Router-1.2.4-Setup.exe`. `npm run preview` opens an isolated fixture at `http://127.0.0.1:18892/dashboard`; it uses synthetic accounts and never calls OpenAI.
 
 To preview frontend edits against the running app without restarting it, run `npm run preview:live` and open `http://127.0.0.1:18893/dashboard`. This browser view uses your real accounts and controls; keep the app running.
 

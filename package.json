@@ -1,6 +1,6 @@
 {
   "name": "account-router",
-  "version": "1.2.1",
+  "version": "1.2.4",
   "private": true,
   "type": "module",
   "description": "Local account routing for Codex on Windows",
@@ -34,6 +34,7 @@
     },
     "files": [
       "desktop/main.cjs",
+      "desktop/data-root.cjs",
       "dashboard/**",
       "router.mjs",
       "dashboard-api.mjs",

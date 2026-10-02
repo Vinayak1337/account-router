@@ -342,7 +342,9 @@ select {
   right: 20px;
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 0;
+  /* Keep controls above the positioned account header, including its padding. */
+  z-index: 1;
   color: var(--muted);
 }
 .order-position {
@@ -351,11 +353,11 @@ select {
   font-size: 11px;
 }
 .drag-handle {
-  width: 24px;
+  width: 44px;
   cursor: grab;
   touch-action: none;
   display: flex;
-  height: 28px;
+  height: 44px;
   align-items: center;
   justify-content: center;
 }
@@ -363,8 +365,8 @@ select {
   width: 13px;
 }
 .move-button {
-  width: 26px;
-  min-height: 25px;
+  width: 44px;
+  min-height: 44px;
   padding: 3px;
   background: transparent;
 }
@@ -372,13 +374,22 @@ select {
   width: 12px;
 }
 .account-top {
-  min-height: 44px;
-  padding-right: 116px;
+  min-height: 48px;
+  padding-right: 156px;
   display: flex;
   align-items: center;
   gap: 12px;
   position: relative;
   min-width: 0;
+}
+.account-card.can-drag .account-top {
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+.account-card.dragging .account-top,
+.account-card.dragging .drag-handle {
+  cursor: grabbing;
 }
 .avatar {
   width: 34px;
@@ -956,8 +967,8 @@ dialog select {
     height: 32px;
   }
   .account-top {
-    min-height: 44px;
-    padding-right: 116px;
+    min-height: 48px;
+    padding-right: 156px;
     gap: 9px;
   }
   .card-actions button {

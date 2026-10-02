@@ -12,6 +12,7 @@ export function accountCards(data, ctx) {
     usableReset,
     moveAccount,
     selectForNewRequests,
+    reauthenticate,
     toggleRecurring,
     toggleDrain,
     drainSaving,
@@ -105,7 +106,8 @@ export function accountCards(data, ctx) {
         !ctx.state?.canReorder ||
         ctx.ordering ||
         event.button !== 0 ||
-        !event.target.closest(".drag-handle")
+        !event.target.closest(".drag-handle,.account-top") ||
+        event.target.closest("button,a,input,select,summary")
       )
         return;
       ctx.cancelDrag?.();
@@ -239,7 +241,12 @@ export function accountCards(data, ctx) {
     );
     selectButton.disabled =
       !data.canSelect || !canChoose(a) || isNext || selectingName === a.name;
-    selectButton.addEventListener("click", () => selectForNewRequests(a.name)); // Actions are grouped below.
+    const needsSignIn =
+      !a.signedIn ||
+      ["sign-in-required", "identity-changed"].includes(a.reason);
+    selectButton.addEventListener("click", () =>
+      needsSignIn ? reauthenticate(a.name) : selectForNewRequests(a.name),
+    );
     selectButton.title = !a.signedIn
       ? "Renew this account sign-in first."
       : !canChoose(a)
@@ -264,6 +271,19 @@ export function accountCards(data, ctx) {
       "aria-label",
       `${selectButton.textContent} · ${name(a)} (${a.profile?.email || a.name})`,
     );
+    if (needsSignIn) {
+      selectButton.id = `reauth-main-${a.name}`;
+      selectButton.textContent = "Re-sign in";
+      selectButton.disabled =
+        !data.canReauthenticate ||
+        !!data.draining ||
+        data.loginBusy ||
+        data.login.state === "waiting";
+      selectButton.title = data.canReauthenticate
+        ? "Renew this account’s sign-in and keep its settings."
+        : "Available after the updated Account Router is next launched.";
+      selectButton.setAttribute("aria-label", `Re-sign in to ${name(a)}`);
+    }
     const recurringRow = elem("div", "recurring-row");
     recurringRow.dataset.key = "recurring";
     const recurringButton = elem(
@@ -355,7 +375,14 @@ export function accountCards(data, ctx) {
       card.append(status);
     }
     card.append(
-      accountDetails(a, data, { name, fullDate, ago, usableReset, openReset }),
+      accountDetails(a, data, {
+        name,
+        fullDate,
+        ago,
+        usableReset,
+        openReset,
+        reauthenticate,
+      }),
     );
     cards.push(card);
   }

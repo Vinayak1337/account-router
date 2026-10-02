@@ -2644,3 +2644,171 @@ test("Shutdown cancels a waiting Drain reset without interrupting its active str
   await stopped;
   assert.equal(f.redemptions.length, 0);
 });
+
+async function waitForSignIn(base, cookie) {
+  for (let i = 0; i < 200; i++) {
+    const status = await (
+      await fetch(base + "/dashboard/api/status", { headers: { cookie } })
+    ).json();
+    if (!status.loginBusy && status.login.state !== "waiting") return status;
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  assert.fail("Sign-in did not settle");
+}
+
+test("re-sign-in replaces credentials in place, preserves policy and rejects another identity", async (t) => {
+  let identity = "id-a";
+  let staging;
+  const f = await fixture(
+    t,
+    () =>
+      Response.json({
+        rate_limit: {
+          allowed: true,
+          primary_window: { used_percent: 20, limit_window_seconds: 18000 },
+        },
+      }),
+    {
+      loginRunner: ({ home }) => {
+        staging = home;
+        return {
+          cancel() {},
+          done: atomicJson(join(home, "auth.json"), {
+            tokens: {
+              account_id: identity,
+              access_token: jwt(Date.now() / 1000 + 7200, identity),
+              refresh_token: "renewed-session",
+            },
+          }),
+        };
+      },
+    },
+  );
+  const a = f.router.accounts[0];
+  a.recurringUse = true;
+  a.drainEnabled = true;
+  a.switchAtRemainingPercent = 0;
+  a.reason = "sign-in-required";
+  const specs = JSON.stringify(f.config.accounts);
+  const cookie = await dashboardSession(f.base);
+  const post = (name) =>
+    fetch(f.base + "/dashboard/api/accounts/reauth", {
+      method: "POST",
+      headers: {
+        cookie,
+        origin: f.base,
+        "x-dashboard-request": "1",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ name }),
+    });
+  assert.equal((await post("missing")).status, 400);
+  assert.equal((await post("a")).status, 202);
+  await f.router.flushed();
+  let status = await waitForSignIn(f.base, cookie);
+  assert.equal(status.login.state, "success");
+  assert.equal(status.login.replacing, true);
+  assert.equal(f.router.accounts.length, 2);
+  assert.equal(f.router.accounts[0], a);
+  assert.equal(JSON.stringify(f.config.accounts), specs);
+  assert.equal(a.recurringUse, true);
+  assert.equal(a.drainEnabled, true);
+  assert.equal(a.switchAtRemainingPercent, 0);
+  assert.equal(a.reason, null);
+  assert.equal((await a.load()).tokens.refresh_token, "renewed-session");
+  await assert.rejects(readFile(join(staging, "auth.json")), {
+    code: "ENOENT",
+  });
+  const before = await readFile(a.path, "utf8");
+  identity = "id-b";
+  assert.equal((await post("a")).status, 202);
+  await f.router.flushed();
+  status = await waitForSignIn(f.base, cookie);
+  assert.equal(status.login.state, "error");
+  assert.match(status.login.message, /same account/);
+  assert.equal(await readFile(a.path, "utf8"), before);
+  await assert.rejects(readFile(join(staging, "auth.json")), {
+    code: "ENOENT",
+  });
+});
+
+test("cancelled re-sign-in and overlapping login leave original credentials untouched", async (t) => {
+  let finish;
+  let staging;
+  const f = await fixture(t, () => ok(), {
+    loginRunner: ({ home }) => {
+      staging = home;
+      return {
+        cancel() {
+          finish();
+        },
+        done: new Promise((resolve) => {
+          finish = resolve;
+        }),
+      };
+    },
+  });
+  const before = await readFile(f.router.accounts[0].path, "utf8");
+  const cookie = await dashboardSession(f.base);
+  const post = (path, body = {}) =>
+    fetch(f.base + "/dashboard/api/" + path, {
+      method: "POST",
+      headers: {
+        cookie,
+        origin: f.base,
+        "x-dashboard-request": "1",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+  assert.equal((await post("accounts/reauth", { name: "a" })).status, 202);
+  assert.equal((await post("accounts/reauth", { name: "b" })).status, 400);
+  assert.equal((await post("accounts")).status, 400);
+  await atomicJson(join(staging, "auth.json"), {
+    tokens: {
+      account_id: "id-a",
+      access_token: jwt(Date.now() / 1000 + 7200),
+      refresh_token: "cancelled",
+    },
+  });
+  await post("login/cancel");
+  await waitForSignIn(f.base, cookie);
+  await f.router.flushed();
+  assert.equal(await readFile(f.router.accounts[0].path, "utf8"), before);
+  await assert.rejects(readFile(join(staging, "auth.json")), {
+    code: "ENOENT",
+  });
+});
+
+test("re-sign-in wins over both an in-flight and a stale queued token refresh", async (t) => {
+  const f = await fixture(t, () => ok(), { expire: true });
+  let finish, entered;
+  const started = new Promise((r) => {
+    entered = r;
+  });
+  const a = new Account({ name: "a", home: "a" }, f.root, async () => {
+    entered();
+    await new Promise((r) => {
+      finish = r;
+    });
+    return Response.json({
+      access_token: jwt(Date.now() / 1000 + 3600),
+      refresh_token: "old-rotation",
+    });
+  });
+  const stale = await a.load();
+  const refreshing = a.token();
+  await started;
+  const replacing = a.replaceCredentials({
+    tokens: {
+      account_id: "id-a",
+      access_token: jwt(Date.now() / 1000 + 7200),
+      refresh_token: "new-login",
+    },
+  });
+  finish();
+  await Promise.all([refreshing, replacing]);
+  assert.equal((await a.load()).tokens.refresh_token, "new-login");
+  assert.equal((await a.refresh(stale)).refresh_token, "new-login");
+  assert.equal((await a.load()).tokens.refresh_token, "new-login");
+});

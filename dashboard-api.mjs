@@ -1,6 +1,6 @@
 import { nativeLogin as windowsLogin } from "./desktop/login.mjs";
-import { readFile, stat } from "node:fs/promises";
-import { resolve } from "node:path";
+import { readFile, stat, rm } from "node:fs/promises";
+import { resolve, relative, isAbsolute } from "node:path";
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { wireCodex, readCodexConnection } from "./codex-integration.mjs";
@@ -85,6 +85,8 @@ export function createDashboard({
     return {
       ...data,
       login,
+      canReauthenticate: true,
+      loginBusy: starting || !!loginProcess,
       codexConnection,
       wiring: !!wirePromise,
       refreshing: !!refreshPromise,
@@ -125,10 +127,16 @@ export function createDashboard({
       ?.slice(17);
     return token && sessions.get(token) > Date.now();
   }
-  async function startLogin(label) {
-    if (starting || login.state === "waiting")
+  async function startLogin(label, targetName) {
+    if (starting || loginProcess || login.state === "waiting")
       throw new Error("A browser sign-in is already waiting.");
-    if (accounts.length >= 20)
+    const target =
+      targetName === undefined
+        ? null
+        : accounts.find((a) => a.name === targetName);
+    if (targetName !== undefined && !target)
+      throw new Error("Account not found.");
+    if (!target && accounts.length >= 20)
       throw new Error("This local dashboard supports up to 20 accounts.");
     starting = true;
     try {
@@ -142,18 +150,27 @@ export function createDashboard({
       )
         number++;
       // Failed attempts keep their protected files. A retry always gets a fresh sign-in folder.
-      const spec = {
-        name: `account-${number}`,
-        label: label || `Account ${number}`,
-        home: `accounts/account-${number}`,
-        switchAtRemainingPercent: 1,
-      };
+      const spec = target
+        ? {
+            name: target.name,
+            label: target.label,
+            home: `accounts/reauth-${randomBytes(16).toString("hex")}`,
+          }
+        : {
+            name: `account-${number}`,
+            label: label || `Account ${number}`,
+            home: `accounts/account-${number}`,
+            switchAtRemainingPercent: 1,
+          };
       login = {
         state: "waiting",
         name: spec.name,
         label: spec.label,
+        replacing: !!target,
         startedAt: Date.now(),
-        message: "Complete the official sign-in in your browser.",
+        message: target
+          ? `Sign in again with ${target.profile.email || target.profile.name || target.label}. Your account order and settings will be kept.`
+          : "Complete the official sign-in in your browser.",
       };
       let cancelled = false;
       let process;
@@ -190,7 +207,38 @@ export function createDashboard({
         .then(async () => {
           if (cancelled) throw new Error("Sign-in cancelled.");
           const account = makeAccount(spec);
-          await account.load();
+          const credentials = await account.load();
+          if (target) {
+            // Stage sign-in separately. Wrong-account and cancelled attempts never touch the original.
+            try {
+              await target.load();
+            } catch {}
+            if (
+              !target.accountIdentity ||
+              target.accountIdentity !== account.accountIdentity
+            )
+              throw new Error(
+                "Sign in with the same account to replace this session.",
+              );
+            if (cancelled) throw new Error("Sign-in cancelled.");
+            committing = true;
+            await target.replaceCredentials(credentials);
+            login = {
+              state: "success",
+              name: target.name,
+              replacing: true,
+              message: "Sign-in renewed. Account order and settings kept.",
+            };
+            record(target, "Account sign-in renewed.");
+            save();
+            await target.usageRefreshing;
+            await target.refreshUsage();
+            await reconcileSelection?.();
+            save();
+            await target.benefits.refresh();
+            save();
+            return;
+          }
           if (!label) {
             spec.label =
               account.profile.name || account.profile.email || spec.name;
@@ -219,6 +267,7 @@ export function createDashboard({
           login = {
             state: "success",
             name: spec.name,
+            replacing: !!target,
             message: "Account connected and available to the proxy.",
           };
           record(account, "Account connected.");
@@ -232,15 +281,25 @@ export function createDashboard({
           login = {
             state: "error",
             name: spec.name,
+            replacing: !!target,
             message: cancelled
               ? "Sign-in cancelled. You can start again."
-              : error.message.includes("already connected")
+              : /already connected|same account/.test(error.message)
                 ? error.message
                 : "Sign-in could not be completed. Try again and choose a different account if necessary.",
           };
         })
-        .finally(() => {
+        .finally(async () => {
           clearTimeout(timer);
+          // This path is generated locally, never supplied by the browser.
+          if (target) {
+            const folder = resolve(root, spec.home);
+            const within = relative(resolve(root, "accounts"), folder);
+            if (within && !within.startsWith("..") && !isAbsolute(within))
+              await rm(folder, { recursive: true, force: true }).catch(
+                () => {},
+              );
+          }
           if (loginProcess === process) loginProcess = null;
         });
     } finally {
@@ -408,6 +467,11 @@ export function createDashboard({
       } else if (url.pathname === "/dashboard/api/accounts/order") {
         await reorderAccounts(input.names);
         reply(res, 200, await status());
+      } else if (url.pathname === "/dashboard/api/accounts/reauth") {
+        if (typeof input.name !== "string" || !input.name)
+          throw new Error("Choose an account to sign in again.");
+        await startLogin(undefined, input.name);
+        reply(res, 202, await status());
       } else if (url.pathname === "/dashboard/api/accounts") {
         if (
           input.label !== undefined &&

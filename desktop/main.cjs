@@ -10,19 +10,12 @@ const {
 const { join, resolve } = require("node:path");
 const { pathToFileURL } = require("node:url");
 const fs = require("node:fs/promises");
+const { dataRoot, migrateLegacyData } = require("./data-root.cjs");
 app.setName("Account Router");
 if (process.platform === "win32")
   app.setAppUserModelId("io.github.vinayak1337.account-router");
-const args = process.argv.slice(app.isPackaged ? 1 : 2),
-  dataIndex = args.indexOf("--data-dir");
-const root = resolve(
-  dataIndex >= 0 && args[dataIndex + 1]
-    ? args[dataIndex + 1]
-    : join(
-        process.env.LOCALAPPDATA || app.getPath("appData"),
-        "Account Router",
-      ),
-);
+const args = process.argv.slice(app.isPackaged ? 1 : 2);
+const root = dataRoot(args, app.getPath("home"));
 let window,
   tray,
   router,
@@ -90,6 +83,8 @@ async function health(port) {
   }
 }
 async function start() {
+  if (!args.includes("--data-dir"))
+    await migrateLegacyData(root, app.getPath("home"));
   const project = resolve(__dirname, "..");
   const { createRouter, localKey, atomicJson } = await import(
     pathToFileURL(join(project, "router.mjs")).href
