@@ -32,6 +32,8 @@ function withDefault(text, value) {
   }
   return line + text;
 }
+// Codex's own retry defaults stay on: they recover dropped connections and
+// brief upstream failures that the router reports as retryable.
 export function descriptor(port, key) {
   return {
     name: "Account Router",
@@ -39,10 +41,36 @@ export function descriptor(port, key) {
     wire_api: "responses",
     requires_openai_auth: true,
     supports_websockets: false,
-    request_max_retries: 0,
-    stream_max_retries: 0,
     http_headers: { "X-Local-Router-Key": key },
   };
+}
+// The same URL and local key identify this installation, including blocks
+// written by older versions with different settings.
+function owned(existing, target) {
+  return (
+    !!existing &&
+    !!target &&
+    existing.base_url === target.base_url &&
+    existing.http_headers?.["X-Local-Router-Key"] ===
+      target.http_headers?.["X-Local-Router-Key"]
+  );
+}
+function providerSnippet(target) {
+  return `\n[model_providers.${PROVIDER}]\nname = "Account Router"\nbase_url = ${JSON.stringify(target.base_url)}\nwire_api = "responses"\nrequires_openai_auth = true\nsupports_websockets = false\nhttp_headers = { "X-Local-Router-Key" = ${JSON.stringify(target.http_headers["X-Local-Router-Key"])} }\n`;
+}
+// Removes this router's provider table and its sub-tables; other text is kept.
+function withoutProvider(text) {
+  const lines = text.split(/(?<=\n)/);
+  const header = new RegExp(
+    `^\\s*\\[\\s*model_providers\\.${PROVIDER}\\s*(\\]|\\.)`,
+  );
+  const out = [];
+  let skipping = false;
+  for (const line of lines) {
+    if (/^\s*\[/.test(line)) skipping = header.test(line);
+    if (!skipping) out.push(line);
+  }
+  return out.join("");
 }
 function matches(a, b) {
   if (!a || !b) return false;
@@ -85,11 +113,14 @@ export async function configure(
   const provider = parsed.model_provider || "openai",
     runtime = join(root, ".runtime");
   if (action === "status") {
-    const own = await expected(root)
-      .then((x) => matches(parsed.model_providers?.[PROVIDER], x.provider))
-      .catch(() => false);
+    const target = await expected(root)
+      .then((x) => x.provider)
+      .catch(() => null);
+    const existing = parsed.model_providers?.[PROVIDER];
+    const own = owned(existing, target);
     const wired = provider === PROVIDER && own;
     return {
+      outdated: own && !matches(existing, target),
       state: wired
         ? "connected"
         : provider === PROVIDER
@@ -105,7 +136,7 @@ export async function configure(
             : "Codex is disconnected.",
     };
   }
-  if (!["wire", "unwire"].includes(action))
+  if (!["wire", "unwire", "repair"].includes(action))
     throw new Error("Unknown connection action.");
   let updated = original,
     nextProvider = provider,
@@ -120,7 +151,7 @@ export async function configure(
         message: "Codex is disconnected.",
       };
     const own = await expected(root);
-    if (!matches(parsed.model_providers?.[PROVIDER], own.provider))
+    if (!owned(parsed.model_providers?.[PROVIDER], own.provider))
       throw new Error(
         "Codex uses another router installation. Disconnect it from that installation.",
       );
@@ -134,6 +165,20 @@ export async function configure(
       );
     updated = withDefault(original, previous);
     nextProvider = previous;
+  } else if (action === "repair") {
+    // Upgrade this router's provider block in place (for example, older
+    // versions disabled Codex retries). The default provider is unchanged.
+    const { provider: target } = await expected(root);
+    const existing = parsed.model_providers?.[PROVIDER];
+    if (!owned(existing, target) || matches(existing, target))
+      return {
+        state: "unchanged",
+        wired: provider === PROVIDER && owned(existing, target),
+        provider,
+      };
+    expectedProvider = target;
+    updated =
+      withoutProvider(original).trimEnd() + "\n" + providerSnippet(target);
   } else {
     const { cfg, key, provider: target } = await expected(root);
     expectedProvider = target;
@@ -144,7 +189,11 @@ export async function configure(
       if (!r.ok) throw new Error("Start the router first.");
       return r.json();
     });
-    if (!health.ok || health.draining || resolve(health.root).toLowerCase() !== resolve(root).toLowerCase())
+    if (
+      !health.ok ||
+      health.draining ||
+      resolve(health.root).toLowerCase() !== resolve(root).toLowerCase()
+    )
       throw new Error(
         "A different router owns this port. Settings were preserved.",
       );
@@ -161,26 +210,28 @@ export async function configure(
     if (!identities.size)
       throw new Error("Add an account before connecting to Codex.");
     const existing = parsed.model_providers?.[PROVIDER];
-    if (existing && !matches(existing, target))
+    if (existing && !owned(existing, target))
       throw new Error(
         "Another router provider already exists. Settings were preserved.",
       );
-    if (provider === PROVIDER)
+    const current = matches(existing, target);
+    if (provider === PROVIDER && current)
       return {
         state: "already-configured",
         wired: true,
         provider: PROVIDER,
         message: "Codex is already connected.",
       };
-    if (!existing) {
-      const snippet = `\n[model_providers.${PROVIDER}]\nname = "Account Router"\nbase_url = ${JSON.stringify(target.base_url)}\nwire_api = "responses"\nrequires_openai_auth = true\nsupports_websockets = false\nrequest_max_retries = 0\nstream_max_retries = 0\nhttp_headers = { "X-Local-Router-Key" = ${JSON.stringify(key)} }\n`;
-      updated = updated.trimEnd() + "\n" + snippet;
-    }
-    await writeFile(
-      join(runtime, "integration.json"),
-      JSON.stringify({ previous_provider: provider }),
-      { mode: 0o600 },
-    );
+    if (!current)
+      updated =
+        withoutProvider(updated).trimEnd() + "\n" + providerSnippet(target);
+    // Reconnecting an outdated block keeps the provider to restore on disconnect.
+    if (provider !== PROVIDER)
+      await writeFile(
+        join(runtime, "integration.json"),
+        JSON.stringify({ previous_provider: provider }),
+        { mode: 0o600 },
+      );
     updated = withDefault(updated, PROVIDER);
     nextProvider = PROVIDER;
   }
@@ -217,6 +268,15 @@ export async function configure(
     throw new Error(
       "Connection changed after setup. A local backup was retained.",
     );
+  if (action === "repair")
+    return {
+      state: "repaired",
+      wired: nextProvider === PROVIDER,
+      provider: nextProvider,
+      restartMayBeNeeded: true,
+      message:
+        "Codex connection settings updated. Reopen Codex to apply them to new chats.",
+    };
   return {
     state: action === "wire" ? "configured" : "disabled",
     wired: action === "wire",
@@ -224,5 +284,78 @@ export async function configure(
     restartMayBeNeeded: true,
     message:
       "Connection updated. Reopen Codex and start a new chat; existing chats retain their saved provider.",
+  };
+}
+
+// CLI-only connection: a Codex profile layered over the user's config by
+// `codex -p account-router`. The default provider, and so the desktop app,
+// is unchanged. The file belongs to the router as a whole.
+export const PROFILE = "account-router";
+export const profilePath = (codexHome) =>
+  join(codexHome, `${PROFILE}.config.toml`);
+export async function configureProfile(
+  root,
+  action,
+  { codexHome = process.env.CODEX_HOME || join(homedir(), ".codex") } = {},
+) {
+  const path = profilePath(codexHome);
+  const bytes = await read(path);
+  let parsed = null;
+  try {
+    parsed = bytes ? parse(decode(bytes)) : null;
+  } catch {
+    parsed = null;
+  }
+  const target = await expected(root)
+    .then((x) => x.provider)
+    .catch(() => null);
+  const existing = parsed?.model_providers?.[PROVIDER];
+  const own = owned(existing, target);
+  const wired = own && parsed?.model_provider === PROVIDER;
+  if (action === "status")
+    return {
+      wired,
+      outdated: wired && !matches(existing, target),
+      profile: PROFILE,
+      message: wired
+        ? `Codex CLI uses the router with: codex -p ${PROFILE}`
+        : bytes && !own
+          ? `${path} belongs to another router or was edited; it was left unchanged.`
+          : "The Codex CLI profile is not set up.",
+    };
+  if (action === "unwire") {
+    if (bytes && !own)
+      throw new Error(
+        `${path} belongs to another router or was edited; it was left unchanged.`,
+      );
+    await unlink(path).catch((e) => {
+      if (e.code !== "ENOENT") throw e;
+    });
+    return {
+      wired: false,
+      profile: PROFILE,
+      message: "Codex CLI profile removed.",
+    };
+  }
+  if (action !== "wire") throw new Error("Unknown connection action.");
+  if (!target) throw new Error("Start the router first.");
+  if (bytes && !own)
+    throw new Error(
+      `${path} belongs to another router or was edited; it was left unchanged.`,
+    );
+  const text = `# Written by Account Router. Used only by: codex -p ${PROFILE}\nmodel_provider = "${PROVIDER}"\n${providerSnippet(target)}`;
+  parse(text);
+  await mkdir(codexHome, { recursive: true });
+  const temp = `${path}.router-${randomUUID()}.tmp`;
+  try {
+    await writeFile(temp, text, { mode: 0o600, flag: "wx" });
+    await rename(temp, path);
+  } finally {
+    await unlink(temp).catch(() => {});
+  }
+  return {
+    wired: true,
+    profile: PROFILE,
+    message: `Codex CLI connected. Use: codex -p ${PROFILE}. The desktop app keeps its own sign-in.`,
   };
 }

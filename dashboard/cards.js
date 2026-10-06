@@ -233,14 +233,19 @@ export function accountCards(data, ctx) {
             ? "Account changed"
             : !a.signedIn || a.reason === "sign-in-required"
               ? "Sign-in needed"
-              : a.needsResetReading ||
-                  !Number.isFinite(a.policy.remainingPercent)
-                ? "Refresh limits"
-                : a.policy.remainingPercent <= 0 || a.blockedUntil > Date.now()
-                  ? "Exhausted"
-                  : a.policy.atThreshold
-                    ? "At switch limit"
-                    : "Ready",
+              : a.transientUntil > Date.now()
+                ? "Retrying shortly"
+                : a.needsResetReading ||
+                    !Number.isFinite(a.policy.remainingPercent)
+                  ? "Refresh limits"
+                  : a.policy.remainingPercent <= 0 ||
+                      a.blockedUntil > Date.now()
+                    ? a.creditsUsable
+                      ? "Credits only"
+                      : "Exhausted"
+                    : a.policy.atThreshold
+                      ? "At switch limit"
+                      : "Ready",
         ),
       );
     identity.append(badges);

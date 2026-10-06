@@ -154,6 +154,10 @@ async function start() {
       router.server.once("error", reject);
       router.server.listen(config.port, "127.0.0.1", accept);
     });
+    // Older versions wrote Codex settings that disabled its retries.
+    import(pathToFileURL(join(__dirname, "connection.mjs")).href)
+      .then(({ configure }) => configure(root, "repair"))
+      .catch(() => {});
     router.server.once("close", async () => {
       await router.drain();
       await cleanupLock();

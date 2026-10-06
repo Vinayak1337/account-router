@@ -31,6 +31,10 @@ async function fixture(
     idleTimeoutMs,
     accountNames = ["a", "b"],
     recurringPollMs,
+    retryBaseMs = 1,
+    preambleHoldMs = 0,
+    transientPauseMs,
+    creditFallback,
   } = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), "codex-router-test-"));
@@ -51,6 +55,7 @@ async function fixture(
   const calls = [];
   const config = {
     strategy,
+    ...(creditFallback ? { creditFallback } : {}),
     accounts: accountNames.map((name) => ({
       name,
       home: name,
@@ -66,6 +71,9 @@ async function fixture(
     connectionRunner,
     idleTimeoutMs,
     recurringPollMs,
+    retryBaseMs,
+    preambleHoldMs,
+    transientPauseMs,
     fetcher: async (url, options) => {
       calls.push({
         url,
@@ -351,7 +359,7 @@ test("Sol uses Free priority simultaneously with usual recurring traffic, withou
   assert.equal(f.router.snapshot().selectedAccount, "a");
 });
 
-test("Free Sol quota fallback exhausts Free priority then uses usual selection; generic throttles do not rotate", async (t) => {
+test("Free Sol quota fallback exhausts Free priority then uses usual selection; generic throttles retry without blocking", async (t) => {
   let throttle = false;
   const f = await fixture(
     t,
@@ -380,10 +388,12 @@ test("Free Sol quota fallback exhausts Free priority then uses usual selection; 
   throttle = true;
   const count = f.calls.length;
   assert.equal((await f.send({ model: "gpt-6-sol" })).status, 429);
+  // Throttles are retried on the Free account, then on the usual fallback.
   assert.deepEqual(
     f.calls.slice(count).map((c) => c.account),
-    ["id-b"],
+    ["id-b", "id-b", "id-b", "id-a", "id-a", "id-a"],
   );
+  assert.equal(b.blockedUntil, 0);
   assert.equal(f.router.snapshot().selectedAccount, "a");
 });
 
@@ -1065,14 +1075,39 @@ test("quota rejection switches to the next paid account and stays there", async 
   );
   assert.ok(f.router.accounts[0].blockedUntil > Date.now());
 });
-test("generic rate throttling does not rotate accounts", async (t) => {
+test("generic throttling is retried on the same account, then the next, and never blocks an account", async (t) => {
   const f = await fixture(
     t,
     () =>
       new Response('{"error":{"code":"rate_limit_exceeded"}}', { status: 429 }),
   );
-  assert.equal((await f.send()).status, 429);
-  assert.equal(f.calls.length, 1);
+  const r = await f.send();
+  assert.equal(r.status, 429);
+  assert.match(await r.text(), /rate_limit_exceeded/);
+  assert.deepEqual(
+    f.calls.map((x) => x.account),
+    ["id-a", "id-a", "id-a", "id-b", "id-b", "id-b"],
+  );
+  assert.ok(f.router.accounts.every((a) => a.blockedUntil === 0));
+});
+test("a short throttle recovers on the same account without switching", async (t) => {
+  let throttled = 0;
+  const f = await fixture(t, () =>
+    ++throttled === 1
+      ? new Response('{"error":{"code":"rate_limit_exceeded"}}', {
+          status: 429,
+          headers: { "retry-after": "0" },
+        })
+      : ok(),
+  );
+  const r = await f.send();
+  assert.equal(r.status, 200);
+  assert.equal(r.headers.get("x-local-router-account"), "a");
+  await r.text();
+  assert.deepEqual(
+    f.calls.map((x) => x.account),
+    ["id-a", "id-a"],
+  );
 });
 test("403 model denial passes through without selecting another account", async (t) => {
   const f = await fixture(t, () => new Response("denied", { status: 403 }));
@@ -1177,12 +1212,32 @@ test("refresh rejects a changed account identity", async (t) => {
   );
   await assert.rejects(() => a.token(), /identity/);
 });
-test("transport failures are not replayed on another account", async (t) => {
+test("transport failures are retried on the same account, then on the next, before any output reaches Codex", async (t) => {
+  let bFailures = 0;
+  const f = await fixture(t, (_u, o) => {
+    if (o.headers.get("ChatGPT-Account-Id") === "id-a" || ++bFailures === 1)
+      throw new Error("network failed");
+    return ok("recovered");
+  });
+  const r = await f.send();
+  assert.equal(r.status, 200);
+  assert.match(await r.text(), /recovered/);
+  assert.deepEqual(
+    f.calls.map((x) => x.account),
+    ["id-a", "id-a", "id-a", "id-b", "id-b"],
+  );
+  // A network failure is not a quota or sign-in problem.
+  assert.equal(f.router.accounts[0].blockedUntil, 0);
+  assert.equal(f.router.accounts[0].reason, null);
+});
+test("when every account is unreachable Codex gets a retryable 502, not a dropped connection", async (t) => {
   const f = await fixture(t, () => {
     throw new Error("network failed");
   });
-  assert.equal((await f.send()).status, 502);
-  assert.equal(f.calls.length, 1);
+  const r = await f.send();
+  assert.equal(r.status, 502);
+  assert.equal((await r.json()).error.code, "upstream_unreachable");
+  assert.equal(f.calls.length, 6);
 });
 test("duplicate labels for one underlying account do not cause a second quota attempt", async (t) => {
   const f = await fixture(t, () => quota());
@@ -1926,39 +1981,56 @@ test("invalid saved state stops startup and preserves the original file", async 
   assert.equal(await readFile(path, "utf8"), before);
 });
 
-test("network failure after a renewed 401 request never replays on another account", async (t) => {
+test("a renewed 401 request that loses its connection is retried with the renewed token", async (t) => {
   let attempts = 0;
-  const f = await fixture(t, (url) => {
+  const auth = [];
+  const f = await fixture(t, (url, o) => {
     if (url.includes("/oauth/token"))
       return Response.json({ access_token: jwt(Date.now() / 1000 + 7200) });
+    auth.push(o.headers.get("authorization"));
     if (++attempts === 1) return new Response("", { status: 401 });
-    throw new Error("connection lost after send");
+    if (attempts === 2) throw new Error("connection lost after send");
+    return ok("renewed");
   });
-  assert.equal((await f.send()).status, 502);
-  assert.equal(attempts, 2);
+  const r = await f.send();
+  assert.equal(r.status, 200);
+  assert.match(await r.text(), /renewed/);
+  assert.equal(attempts, 3);
+  assert.notEqual(auth[1], auth[0]);
+  assert.equal(auth[2], auth[1]);
   assert.ok(f.calls.every((call) => call.account !== "id-b"));
 });
 
-test("multiline and unterminated SSE events retain origin and quota failure", async (t) => {
+test("a quota failure before any output (multiline, unterminated SSE) moves the request to the next account", async (t) => {
   const f = await fixture(
     t,
-    () =>
-      new Response(
-        'data: {"type":"response.failed",\ndata: "response":{"id":"final-ref","error":{"code":"usage_limit_reached"}}}',
-        { headers: { "content-type": "text/event-stream" } },
-      ),
+    (_u, o) =>
+      o.headers.get("ChatGPT-Account-Id") === "id-a"
+        ? new Response(
+            'data: {"type":"response.created","response":{"id":"held"}}\n\ndata: {"type":"response.failed",\ndata: "response":{"id":"final-ref","error":{"code":"usage_limit_reached"}}}',
+            { headers: { "content-type": "text/event-stream" } },
+          )
+        : ok("served-by-b"),
+    { preambleHoldMs: 1000 },
   );
-  await (await f.send()).text();
+  const r = await f.send();
+  const text = await r.text();
+  assert.match(text, /served-by-b/);
+  assert.doesNotMatch(text, /usage_limit_reached|held/);
+  assert.equal(r.headers.get("x-local-router-account"), "b");
   assert.ok(f.router.accounts[0].blockedUntil > Date.now());
+  // The failed response stays tied to A; B is now selected.
   assert.equal(
     (await f.send({ previous_response_id: "final-ref" })).status,
-    429,
+    409,
   );
-  assert.equal(f.calls.length, 1);
-  assert.match(f.router.snapshot().events[0].message, /failed/);
+  assert.deepEqual(
+    f.calls.map((x) => x.account),
+    ["id-a", "id-b"],
+  );
 });
 
-test("stream activity extends idle timeout; a stalled stream is aborted without replay", async (t) => {
+test("stream activity extends idle timeout; a stalled stream ends with a retryable failure event, without replay", async (t) => {
   let stalled = false;
   const f = await fixture(
     t,
@@ -1998,9 +2070,9 @@ test("stream activity extends idle timeout; a stalled stream is aborted without 
   );
   assert.match(await (await f.send()).text(), /response.completed/);
   stalled = true;
-  await assert.rejects(async () => {
-    await (await f.send()).text();
-  });
+  const stalledReply = await f.send();
+  assert.equal(stalledReply.status, 200);
+  assert.match(await stalledReply.text(), /router_upstream_interrupted/);
   assert.equal(f.calls.length, 2);
 });
 
@@ -3013,4 +3085,358 @@ test("re-sign-in wins over both an in-flight and a stale queued token refresh", 
   assert.equal((await a.load()).tokens.refresh_token, "new-login");
   assert.equal((await a.refresh(stale)).refresh_token, "new-login");
   assert.equal((await a.load()).tokens.refresh_token, "new-login");
+});
+
+// Codex compatibility: each test reproduces an error seen through the router.
+const sse = (...events) =>
+  new Response(events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join(""), {
+    headers: { "content-type": "text/event-stream" },
+  });
+const dropAfter = (...events) =>
+  new Response(
+    new ReadableStream({
+      start(controller) {
+        for (const e of events)
+          controller.enqueue(
+            new TextEncoder().encode(`data: ${JSON.stringify(e)}\n\n`),
+          );
+        // A partial event, then the connection drops.
+        controller.enqueue(new TextEncoder().encode('data: {"type":"resp'));
+        setTimeout(() => controller.error(new Error("socket hang up")), 5);
+      },
+    }),
+    { headers: { "content-type": "text/event-stream" } },
+  );
+
+test("'error decoding response body': a stream dropped mid-output ends with a whole, retryable failure event", async (t) => {
+  const f = await fixture(t, () =>
+    dropAfter(
+      { type: "response.created", response: { id: "r-drop" } },
+      { type: "response.output_text.delta", delta: "partial" },
+    ),
+  );
+  const r = await f.send();
+  assert.equal(r.status, 200);
+  const text = await r.text(); // must not reject: the connection is not cut
+  assert.match(text, /partial/);
+  assert.doesNotMatch(text, /"type":"resp\n/);
+  const events = text
+    .trim()
+    .split("\n\n")
+    .map((block) => block.split("\n").find((l) => l.startsWith("data:")))
+    .filter(Boolean)
+    .map((l) => JSON.parse(l.slice(5)));
+  const last = events.at(-1);
+  assert.equal(last.type, "response.failed");
+  assert.equal(last.response.error.code, "router_upstream_interrupted");
+  // Codex maps unknown failure codes to a retryable stream error.
+  assert.equal(f.calls.length, 1);
+});
+
+test("'503 Service Unavailable': upstream 5xx is retried on the same account and Codex never sees it", async (t) => {
+  let failures = 0;
+  const f = await fixture(t, () =>
+    ++failures <= 2
+      ? new Response('{"error":{"message":"Service Unavailable"}}', {
+          status: 503,
+        })
+      : ok("after-503"),
+  );
+  const r = await f.send();
+  assert.equal(r.status, 200);
+  assert.match(await r.text(), /after-503/);
+  assert.deepEqual(
+    f.calls.map((c) => c.account),
+    ["id-a", "id-a", "id-a"],
+  );
+  assert.equal(f.router.snapshot().selectedAccount, "a");
+});
+
+test("persistent 5xx moves to the next account, and only all-failing returns the upstream 503", async (t) => {
+  const f = await fixture(t, (_u, o) =>
+    o.headers.get("ChatGPT-Account-Id") === "id-a"
+      ? new Response("{}", { status: 502 })
+      : ok("b-served"),
+  );
+  const r = await f.send();
+  assert.match(await r.text(), /b-served/);
+  assert.deepEqual(
+    f.calls.map((c) => c.account),
+    ["id-a", "id-a", "id-a", "id-b"],
+  );
+  // A transient failure never changes the selection used by other requests.
+  assert.equal(f.router.snapshot().selectedAccount, "a");
+  const all = await fixture(
+    t,
+    () =>
+      new Response('{"error":{"message":"overloaded"}}', {
+        status: 503,
+        headers: { "retry-after": "0" },
+      }),
+  );
+  const failed = await all.send();
+  assert.equal(failed.status, 503);
+  assert.match(await failed.text(), /overloaded/);
+  assert.equal(all.calls.length, 6);
+});
+
+test("overload right after response.created is moved to another account before Codex sees anything", async (t) => {
+  const f = await fixture(
+    t,
+    (_u, o) =>
+      o.headers.get("ChatGPT-Account-Id") === "id-a"
+        ? sse(
+            { type: "response.created", response: { id: "a-1" } },
+            {
+              type: "response.failed",
+              response: { id: "a-1", error: { code: "server_is_overloaded" } },
+            },
+          )
+        : ok("b-1"),
+    { preambleHoldMs: 1000 },
+  );
+  const r = await f.send();
+  const text = await r.text();
+  assert.match(text, /b-1/);
+  assert.doesNotMatch(text, /a-1|server_is_overloaded/);
+  assert.deepEqual(
+    f.calls.map((c) => c.account),
+    ["id-a", "id-a", "id-a", "id-b"],
+  );
+});
+
+test("non-retryable stream failures pass through unchanged", async (t) => {
+  const f = await fixture(
+    t,
+    () =>
+      sse(
+        { type: "response.created", response: { id: "c-1" } },
+        {
+          type: "response.failed",
+          response: { id: "c-1", error: { code: "context_length_exceeded" } },
+        },
+      ),
+    { preambleHoldMs: 1000 },
+  );
+  assert.match(await (await f.send()).text(), /context_length_exceeded/);
+  assert.equal(f.calls.length, 1);
+});
+
+test("'This account is busy': concurrent requests on one account are all served", async (t) => {
+  let active = 0,
+    peak = 0;
+  const f = await fixture(t, async () => {
+    peak = Math.max(peak, ++active);
+    await new Promise((r) => setTimeout(r, 30));
+    active--;
+    return ok();
+  });
+  const replies = await Promise.all(Array.from({ length: 6 }, () => f.send()));
+  for (const r of replies) {
+    assert.equal(r.status, 200);
+    assert.equal(r.headers.get("x-local-router-account"), "a");
+    await r.text();
+  }
+  assert.equal(peak, 6);
+});
+
+test("a temporary sign-in failure pauses the account briefly instead of requiring a new sign-in", async (t) => {
+  let tokenCalls = 0;
+  const f = await fixture(
+    t,
+    (url, o) => {
+      if (url.includes("/oauth/token"))
+        return ++tokenCalls === 1
+          ? new Response("bad gateway", { status: 502 })
+          : Response.json({
+              access_token: jwt(Date.now() / 1000 + 7200, "id-a"),
+            });
+      return ok(o.headers.get("ChatGPT-Account-Id"));
+    },
+    { expire: true, accountNames: ["a"], transientPauseMs: 60 },
+  );
+  // One account: the router waits out the short pause and then serves.
+  const r = await f.send();
+  assert.equal(r.status, 200);
+  assert.match(await r.text(), /id-a/);
+  assert.equal(tokenCalls, 2);
+  assert.equal(f.router.accounts[0].reason, null);
+});
+
+test("only an explicit refresh rejection marks an account for sign-in; others serve meanwhile", async (t) => {
+  const f = await fixture(
+    t,
+    (url, o) => {
+      if (url.includes("/oauth/token"))
+        return JSON.parse(o.body).refresh_token === "refresh-a"
+          ? Response.json({ error: "invalid_grant" }, { status: 400 })
+          : Response.json({
+              access_token: jwt(Date.now() / 1000 + 7200, "id-b"),
+            });
+      return ok(o.headers.get("ChatGPT-Account-Id"));
+    },
+    { expire: true },
+  );
+  const r = await f.send();
+  assert.match(await r.text(), /id-b/);
+  assert.equal(f.router.accounts[0].reason, "sign-in-required");
+  assert.equal(f.router.accounts[1].reason, null);
+});
+
+test("a refresh outage does not stop a token that is still valid", async (t) => {
+  const f = await fixture(t, (url) => {
+    if (url.includes("/oauth/token")) throw new Error("offline");
+    return ok("still-valid");
+  });
+  // Expires in 30s: inside the refresh window, but still usable.
+  await atomicJson(join(f.root, "a", "auth.json"), {
+    tokens: {
+      account_id: "id-a",
+      access_token: jwt(Math.floor(Date.now() / 1000) + 30, "id-a"),
+      refresh_token: "refresh-a",
+      id_token: "id-token",
+    },
+  });
+  const r = await f.send();
+  assert.match(await r.text(), /still-valid/);
+  assert.equal(r.headers.get("x-local-router-account"), "a");
+  assert.equal(f.router.accounts[0].reason, null);
+});
+
+test("all accounts exhausted returns Codex's usage-limit shape with the reset time", async (t) => {
+  const f = await fixture(t, () => quota());
+  const r = await f.send();
+  assert.equal(r.status, 429);
+  const body = await r.json();
+  assert.equal(body.error.type, "usage_limit_reached");
+  assert.ok(body.error.resets_at > Date.now() / 1000);
+  assert.ok(Number(r.headers.get("retry-after")) > 0);
+});
+
+test("credits serve as a last resort only after every plan allowance is used", async (t) => {
+  const f = await fixture(t, (_u, o) =>
+    ok(o.headers.get("ChatGPT-Account-Id")),
+  );
+  const [a, b] = f.router.accounts;
+  const exhaust = (account, credits) => {
+    observedUsage(account, 100);
+    account.block(
+      new Headers(),
+      { resets_at: Date.now() / 1000 + 3600 },
+      "usage",
+    );
+    account.credits = { hasCredits: credits, unlimited: false };
+  };
+  exhaust(a, true);
+  // B still has allowance: credits are not used.
+  let r = await f.send();
+  assert.match(await r.text(), /id-b/);
+  exhaust(b, false);
+  r = await f.send();
+  assert.equal(r.headers.get("x-local-router-route"), "credits");
+  assert.match(await r.text(), /id-a/);
+  // An actual rejection while on credits stops credit use for that account.
+  const g = await fixture(t, () => quota(), { accountNames: ["a"] });
+  exhaust(g.router.accounts[0], true);
+  assert.equal((await g.send()).status, 429);
+  assert.equal(g.router.accounts[0].blockSource, "response");
+  assert.equal((await g.send()).status, 429);
+  assert.equal(g.calls.length, 1);
+});
+
+test("credit fallback can be turned off", async (t) => {
+  const f = await fixture(t, () => ok(), {
+    accountNames: ["a"],
+    creditFallback: "never",
+  });
+  const [a] = f.router.accounts;
+  observedUsage(a, 100);
+  a.block(new Headers(), { resets_at: Date.now() / 1000 + 3600 }, "usage");
+  a.credits = { hasCredits: true };
+  const r = await f.send();
+  assert.equal(r.status, 429);
+  assert.match((await r.json()).error.message, /credits are turned off/);
+  assert.equal(f.calls.length, 0);
+  await assert.rejects(
+    createRouter(
+      { strategy: "exhaust-first", creditFallback: "sometimes", accounts: [] },
+      { root: f.root, key: KEY, persist: false },
+    ),
+    /Credit fallback/,
+  );
+});
+
+test("reasoning rejected by another account is dropped once and the conversation resent", async (t) => {
+  const bodies = [];
+  const f = await fixture(t, (_u, o) => {
+    bodies.push(JSON.parse(o.body));
+    return bodies.length === 1
+      ? Response.json(
+          {
+            error: {
+              code: "invalid_encrypted_content",
+              message: "The encrypted content could not be verified.",
+            },
+          },
+          { status: 400 },
+        )
+      : ok();
+  });
+  const input = [
+    { type: "message", role: "user", content: [] },
+    { type: "reasoning", encrypted_content: "from-another-account" },
+    { type: "function_call", call_id: "c1", name: "shell", arguments: "{}" },
+  ];
+  const r = await f.send({ model: "test", input, stream: true });
+  assert.equal(r.status, 200);
+  await r.text();
+  assert.equal(bodies.length, 2);
+  assert.equal(bodies[0].input.length, 3);
+  assert.deepEqual(
+    bodies[1].input.map((i) => i.type),
+    ["message", "function_call"],
+  );
+});
+
+test("Codex headers are forwarded, and sticky turn state stays with its account", async (t) => {
+  let turn = 0;
+  const f = await fixture(t, (_u, o) => {
+    assert.equal(o.headers.get("x-codex-beta-features"), "feature-x");
+    assert.equal(o.headers.get("x-openai-subagent"), "review");
+    assert.equal(o.headers.get("x-openai-actor-authorization"), null);
+    const response = ok();
+    response.headers.set(
+      "x-codex-turn-state",
+      `${o.headers.get("ChatGPT-Account-Id")}-state-${++turn}`,
+    );
+    response.headers.set("x-reasoning-included", "true");
+    return response;
+  });
+  const headers = {
+    "x-codex-beta-features": "feature-x",
+    "x-openai-subagent": "review",
+    "x-openai-actor-authorization": "secret",
+  };
+  const first = await f.send(undefined, headers);
+  await first.text();
+  const state = first.headers.get("x-codex-turn-state");
+  assert.equal(state, "id-a-state-1");
+  assert.equal(first.headers.get("x-reasoning-included"), "true");
+  await (
+    await f.send(undefined, { ...headers, "x-codex-turn-state": state })
+  ).text();
+  assert.equal(f.calls[1].options.headers.get("x-codex-turn-state"), state);
+  // Once A is unavailable, A's turn state is not sent to B.
+  observedUsage(f.router.accounts[0], 100);
+  await (
+    await f.send(undefined, { ...headers, "x-codex-turn-state": state })
+  ).text();
+  assert.equal(f.calls[2].account, "id-b");
+  assert.equal(f.calls[2].options.headers.get("x-codex-turn-state"), null);
+});
+
+test("connections stay open longer than Codex's idle pool", async (t) => {
+  const f = await fixture(t, () => ok());
+  assert.ok(f.router.server.keepAliveTimeout >= 120_000);
+  assert.ok(f.router.server.headersTimeout > f.router.server.keepAliveTimeout);
 });
