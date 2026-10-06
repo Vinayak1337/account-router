@@ -190,3 +190,34 @@ test("new connections leave Codex's retry defaults on", () => {
   assert.equal("request_max_retries" in p, false);
   assert.equal("stream_max_retries" in p, false);
 });
+test("the CLI profile routes only `codex -p account-router` and leaves config.toml untouched", async () => {
+  const { configureProfile, profilePath } = await import("./connection.mjs");
+  const f = await fixture();
+  await writeFile(f.path, 'model = "user-model"\n');
+  const before = await readFile(f.path);
+  assert.equal(
+    (await configureProfile(f.root, "status", { codexHome: f.home })).wired,
+    false,
+  );
+  await configureProfile(f.root, "wire", { codexHome: f.home });
+  const profile = await readFile(profilePath(f.home), "utf8");
+  assert.match(profile, /model_provider = "local_paid_accounts"/);
+  assert.equal(/max_retries/.test(profile), false);
+  assert.deepEqual(await readFile(f.path), before);
+  assert.equal(
+    (await configureProfile(f.root, "status", { codexHome: f.home })).wired,
+    true,
+  );
+  await configureProfile(f.root, "unwire", { codexHome: f.home });
+  await assert.rejects(readFile(profilePath(f.home)));
+  // A profile written by someone else is never replaced or removed.
+  await writeFile(profilePath(f.home), 'model_provider = "other"\n');
+  await assert.rejects(
+    configureProfile(f.root, "wire", { codexHome: f.home }),
+    /left unchanged/,
+  );
+  await assert.rejects(
+    configureProfile(f.root, "unwire", { codexHome: f.home }),
+    /left unchanged/,
+  );
+});

@@ -19,7 +19,7 @@ import {
 } from "node:fs/promises";
 import { createRouter, localKey, atomicJson } from "../router.mjs";
 import { protectStorage, findCodexCli } from "../desktop/login.mjs";
-import { configure } from "../desktop/connection.mjs";
+import { configure, configureProfile } from "../desktop/connection.mjs";
 import { wireCodex, detectCodex } from "../codex-integration.mjs";
 
 const require = createRequire(import.meta.url);
@@ -147,6 +147,9 @@ async function serve() {
     .then((r) => {
       if (r.state === "repaired") console.log(r.message);
     })
+    .catch(() => {});
+  configureProfile(root, "status")
+    .then((r) => r.outdated && configureProfile(root, "wire"))
     .catch(() => {});
   let stopping = false;
   const stop = async () => {
@@ -304,9 +307,13 @@ async function status() {
     headers: { "X-Local-Router-Key": r.key },
   }).then((x) => x.json());
   const connection = await configure(root, "status").catch(() => null);
+  const cli = await configureProfile(root, "status").catch(() => null);
   console.log(`Router     running · ${dashboardUrl(r.config.port)}`);
   console.log(
-    `Codex      ${connection?.wired ? "connected" : "not connected (run: account-router connect)"}${connection?.outdated ? " · settings outdated, restart the router" : ""}`,
+    `Codex app  ${connection?.wired ? "connected" : "own sign-in (account-router connect routes it)"}${connection?.outdated ? " · settings outdated, restart the router" : ""}`,
+  );
+  console.log(
+    `Codex CLI  ${cli?.wired ? "connected: codex -p account-router" : "not connected (run: account-router connect --cli)"}`,
   );
   console.log(
     `Selected   ${data.selectedAccount || "none"} · credits ${data.creditFallback === "never" ? "off" : "last resort"} · ${data.inFlight} active request(s)`,
@@ -322,7 +329,10 @@ async function status() {
 async function connect(enabled) {
   if (!(await running()))
     throw new Error("Start the router first: account-router start");
-  const result = await wireCodex({ root, enabled });
+  // --cli: only `codex -p account-router` uses the router; the app is unchanged.
+  const result = args.includes("--cli")
+    ? await configureProfile(root, enabled ? "wire" : "unwire")
+    : await wireCodex({ root, enabled });
   console.log(result.message);
 }
 async function logs() {
@@ -379,10 +389,11 @@ async function doctor() {
     "Run: account-router start",
   );
   const connection = await configure(root, "status").catch(() => null);
+  const profile = await configureProfile(root, "status").catch(() => null);
   check(
-    !!connection?.wired,
-    `Codex ${connection?.wired ? "connected" : connection?.message || "not connected"}`,
-    "Run: account-router connect, then reopen Codex.",
+    !!connection?.wired || !!profile?.wired,
+    `Codex ${[connection?.wired && "app", profile?.wired && "CLI (codex -p account-router)"].filter(Boolean).join(" + ") || "not connected"}`,
+    "Run: account-router connect (app) or account-router connect --cli (CLI only).",
   );
   if (connection?.outdated)
     check(
@@ -406,7 +417,8 @@ Usage: account-router <command> [--data-dir <folder>]
   status       Router, Codex connection and per-account usage
   open         Open the dashboard in your browser (add accounts there)
   connect      Point Codex at the router (reopen Codex afterwards)
-  disconnect   Restore Codex's previous provider
+               --cli: only \`codex -p account-router\` uses it; the app is unchanged
+  disconnect   Restore Codex's previous provider (--cli removes the profile)
   doctor       Check the setup and explain any fixes
   logs         Show recent router log lines
   uninstall    Remove the background service (keeps accounts and settings)

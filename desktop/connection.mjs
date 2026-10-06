@@ -286,3 +286,76 @@ export async function configure(
       "Connection updated. Reopen Codex and start a new chat; existing chats retain their saved provider.",
   };
 }
+
+// CLI-only connection: a Codex profile layered over the user's config by
+// `codex -p account-router`. The default provider, and so the desktop app,
+// is unchanged. The file belongs to the router as a whole.
+export const PROFILE = "account-router";
+export const profilePath = (codexHome) =>
+  join(codexHome, `${PROFILE}.config.toml`);
+export async function configureProfile(
+  root,
+  action,
+  { codexHome = process.env.CODEX_HOME || join(homedir(), ".codex") } = {},
+) {
+  const path = profilePath(codexHome);
+  const bytes = await read(path);
+  let parsed = null;
+  try {
+    parsed = bytes ? parse(decode(bytes)) : null;
+  } catch {
+    parsed = null;
+  }
+  const target = await expected(root)
+    .then((x) => x.provider)
+    .catch(() => null);
+  const existing = parsed?.model_providers?.[PROVIDER];
+  const own = owned(existing, target);
+  const wired = own && parsed?.model_provider === PROVIDER;
+  if (action === "status")
+    return {
+      wired,
+      outdated: wired && !matches(existing, target),
+      profile: PROFILE,
+      message: wired
+        ? `Codex CLI uses the router with: codex -p ${PROFILE}`
+        : bytes && !own
+          ? `${path} belongs to another router or was edited; it was left unchanged.`
+          : "The Codex CLI profile is not set up.",
+    };
+  if (action === "unwire") {
+    if (bytes && !own)
+      throw new Error(
+        `${path} belongs to another router or was edited; it was left unchanged.`,
+      );
+    await unlink(path).catch((e) => {
+      if (e.code !== "ENOENT") throw e;
+    });
+    return {
+      wired: false,
+      profile: PROFILE,
+      message: "Codex CLI profile removed.",
+    };
+  }
+  if (action !== "wire") throw new Error("Unknown connection action.");
+  if (!target) throw new Error("Start the router first.");
+  if (bytes && !own)
+    throw new Error(
+      `${path} belongs to another router or was edited; it was left unchanged.`,
+    );
+  const text = `# Written by Account Router. Used only by: codex -p ${PROFILE}\nmodel_provider = "${PROVIDER}"\n${providerSnippet(target)}`;
+  parse(text);
+  await mkdir(codexHome, { recursive: true });
+  const temp = `${path}.router-${randomUUID()}.tmp`;
+  try {
+    await writeFile(temp, text, { mode: 0o600, flag: "wx" });
+    await rename(temp, path);
+  } finally {
+    await unlink(temp).catch(() => {});
+  }
+  return {
+    wired: true,
+    profile: PROFILE,
+    message: `Codex CLI connected. Use: codex -p ${PROFILE}. The desktop app keeps its own sign-in.`,
+  };
+}

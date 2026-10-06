@@ -50,6 +50,31 @@ Enable **Drain** on an account, then select it (or let normal routing select it)
 
 A newer manual selection or disabling Drain cancels the automatic return. An already-submitted reset can still complete. Failed, unconfirmed, or interrupted reset cycles pause Drain instead of spending another credit; check **Details**, retry the same pending reset if needed, then toggle Drain off/on to re-arm. Existing response IDs remain tied to their original account.
 
+## Codex CLI only (macOS)
+
+`node bin/account-router.mjs connect --cli` writes `~/.codex/account-router.config.toml`, a Codex profile used only by `codex -p account-router`. The ChatGPT app keeps its own sign-in.
+
+## pi: native account pool
+
+`pi/codex-accounts` is a [pi](https://github.com/badlogic/pi-mono) extension that switches ChatGPT accounts inside pi itself, without the router.
+
+```sh
+ln -s "$PWD/pi/codex-accounts" ~/.pi/agent/extensions/codex-accounts
+pi   # then /login codex-1, /login codex-2, … (pi's own ChatGPT sign-in, one per account)
+pi --provider codex-pool --model gpt-6-luna
+```
+
+- Requests go to the first ready account. A limited account is paused until its exact reset (from the limit error, response headers or the usage endpoint) and the same request moves on; nothing switches once output has started.
+- After the reset the account is confirmed with a usage check and returns to rotation; if another window is still exhausted it stays paused until that later reset. Accounts switch at 1% remaining by default (`/codex-accounts cutoff <percent>`).
+- A model missing from one account's plan is tried on the others. Brief 429/5xx failures are retried.
+- `/codex-accounts` lists accounts, usage and reset times; `/codex-accounts refresh` reads usage now. State: `~/.pi/agent/codex-accounts.json`.
+
+Tests: `node --test pi/codex-accounts/test.mjs` (runs the real `pi -p` against a local stand-in backend).
+
+## Claude Code: pi subagents
+
+`claude/pi-subagents` is a Claude Code mod that gives Claude a `codex_subagent` tool: each call runs a pi subagent on `codex-pool` (parallel calls run in parallel), read-only by default or with edit access, and can continue an earlier subagent by `session_id`. Load it for every session by setting `CLAUDE_CODE_PLUGIN_DIRS` to that folder in `~/.claude/settings.json` (`env`).
+
 ## Reliability
 
 Nothing is shown to Codex until the router has a working reply:
