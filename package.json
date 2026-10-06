@@ -1,18 +1,22 @@
 {
   "name": "account-router",
-  "version": "1.2.5",
+  "version": "1.3.0",
   "private": true,
   "type": "module",
-  "description": "Local account routing for Codex on Windows",
+  "description": "Local account routing for Codex on Windows and macOS",
   "author": "Vinayak1337",
   "license": "MIT",
   "main": "desktop/main.cjs",
+  "bin": {
+    "account-router": "bin/account-router.mjs"
+  },
   "engines": {
     "node": ">=22"
   },
   "scripts": {
     "start": "electron .",
     "start:server": "node router.mjs",
+    "router": "node bin/account-router.mjs",
     "preview": "node dev/preview.mjs",
     "test": "node --test router.test.mjs desktop/*.test.mjs dev/live-preview.test.mjs",
     "build:win": "electron-builder --win nsis",

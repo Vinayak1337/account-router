@@ -46,6 +46,7 @@ export function createDashboard({
   setDrainUse,
   resetBusy,
   setFreeSolRouting,
+  setCreditFallback,
   reconcileSelection,
   loginRunner = windowsLogin,
   wireRunner = wireCodex,
@@ -66,8 +67,9 @@ export function createDashboard({
       try {
         await account.load();
         account.signedIn = true;
-      } catch {
-        account.signedIn = false;
+      } catch (error) {
+        // A briefly locked file is not a signed-out account.
+        if (error.permanent !== false) account.signedIn = false;
       }
     }
     try {
@@ -389,6 +391,9 @@ export function createDashboard({
         reply(res, 200, await status());
       } else if (url.pathname === "/dashboard/api/settings/free-sol") {
         await setFreeSolRouting(input.enabled);
+        reply(res, 200, await status());
+      } else if (url.pathname === "/dashboard/api/settings/credits") {
+        await setCreditFallback(input.policy);
         reply(res, 200, await status());
       } else if (url.pathname === "/dashboard/api/codex/wire") {
         const enabled = input.enabled ?? true;

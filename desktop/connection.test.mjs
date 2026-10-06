@@ -147,3 +147,46 @@ test("wire verifies ownership, preserves settings, is idempotent, and reconnects
     true,
   );
 });
+test("repair removes the old zero-retry settings in place and keeps every other setting", async () => {
+  const f = await fixture();
+  const other = `\n[model_providers.explabs]\nname = "Other"\nbase_url = "https://example.invalid/v1"\nwire_api = "responses"\n\n[tui]\ntheme = "dark"\n`;
+  await writeFile(f.path, providerText() + other);
+  const before = await configure(f.root, "status", { codexHome: f.home });
+  assert.equal(before.wired, true);
+  assert.equal(before.outdated, true);
+  const result = await configure(f.root, "repair", { codexHome: f.home });
+  assert.equal(result.state, "repaired");
+  assert.equal(result.wired, true);
+  const output = await readFile(f.path, "utf8");
+  assert.equal(/max_retries/.test(output), false);
+  assert.ok(output.includes('model = "user-model"'));
+  assert.ok(output.includes("[model_providers.explabs]"));
+  assert.ok(output.includes('theme = "dark"'));
+  assert.equal(
+    output.match(/\[model_providers\.local_paid_accounts\]/g).length,
+    1,
+  );
+  const after = await configure(f.root, "status", { codexHome: f.home });
+  assert.equal(after.wired, true);
+  assert.equal(after.outdated, false);
+  assert.equal(
+    (await configure(f.root, "repair", { codexHome: f.home })).state,
+    "unchanged",
+  );
+  // A different router's block is never rewritten.
+  await writeFile(
+    f.path,
+    `model_provider = "${PROVIDER}"\n[model_providers.${PROVIDER}]\nbase_url = "http://127.0.0.1:12345/v1"\nrequest_max_retries = 0\n`,
+  );
+  const foreign = await readFile(f.path);
+  assert.equal(
+    (await configure(f.root, "repair", { codexHome: f.home })).state,
+    "unchanged",
+  );
+  assert.deepEqual(await readFile(f.path), foreign);
+});
+test("new connections leave Codex's retry defaults on", () => {
+  const p = descriptor(18898, "fixture-local-key-12345678901234567890");
+  assert.equal("request_max_retries" in p, false);
+  assert.equal("stream_max_retries" in p, false);
+});

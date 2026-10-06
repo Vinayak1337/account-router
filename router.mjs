@@ -31,8 +31,129 @@ const QUOTA_CODES = new Set([
   "usage_not_included",
   "insufficient_quota",
 ]);
+// Upstream failures Codex itself would retry. Nothing has reached Codex yet when
+// these are handled, so the router retries them on the same account and then on
+// the next eligible one.
+const RETRYABLE_STATUS = new Set([500, 502, 503, 504]);
+const RETRYABLE_STREAM_CODES = new Set([
+  "server_error",
+  "server_is_overloaded",
+  "rate_limit_exceeded",
+  "slow_down",
+  "internal_error",
+]);
+const ATTEMPTS_PER_ACCOUNT = 3;
+// A short, known pause (a transient sign-in failure, a throttle) is waited out
+// inside the router instead of failing the request.
+const SHORT_WAIT_MS = 20_000;
+const TRANSIENT_PAUSE_MS = 15_000;
+// Events that carry no model output. They are held back so that a failure right
+// after them can still move the request to another account.
+const PREAMBLE_EVENTS = new Set([
+  "response.created",
+  "response.in_progress",
+  "response.queued",
+]);
+const PREAMBLE_HOLD_MS = 30_000;
+// Request headers Codex uses for routing, features and telemetry. Identity and
+// authorization headers are never forwarded.
+const FORWARDED_REQUEST_HEADERS = new Set([
+  "openai-beta",
+  "version",
+  "session_id",
+  "conversation_id",
+  "x-client-request-id",
+]);
+const BLOCKED_REQUEST_HEADERS = new Set([
+  "x-openai-actor-authorization",
+  "x-codex-turn-state",
+]);
+const FORWARDED_RESPONSE_HEADERS = [
+  "x-codex-turn-state",
+  "x-reasoning-included",
+  "openai-model",
+  "x-request-id",
+  "x-oai-request-id",
+  "x-models-etag",
+  "x-codex-safety-buffering-enabled",
+  "x-codex-safety-buffering-faster-model",
+];
+const CREDIT_POLICIES = new Set(["last-resort", "never"]);
 const identityHash = (id) => createHash("sha256").update(id).digest("hex");
-const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+const pause = (ms, signal) =>
+  new Promise((accept, reject) => {
+    if (signal?.aborted) return reject(new Error("Request cancelled."));
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", stop);
+      accept();
+    }, ms);
+    const stop = () => {
+      clearTimeout(timer);
+      reject(new Error("Request cancelled."));
+    };
+    signal?.addEventListener("abort", stop, { once: true });
+  });
+// `permanent` failures need a new sign-in; anything else is retried later.
+export class AuthError extends Error {
+  constructor(message, permanent) {
+    super(message);
+    this.permanent = permanent;
+  }
+}
+const TRANSIENT_FILE_ERRORS = new Set(["EBUSY", "EPERM", "EACCES", "EMFILE"]);
+async function readCredentials(path) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return JSON.parse((await readFile(path, "utf8")).replace(/^﻿/, ""));
+    } catch (error) {
+      // Windows can briefly lock a file that was just replaced or scanned.
+      const transient =
+        TRANSIENT_FILE_ERRORS.has(error.code) || error instanceof SyntaxError;
+      if (transient && attempt < 4) {
+        await pause(25 * 2 ** attempt);
+        continue;
+      }
+      throw new AuthError(
+        "Sign in to this router account first.",
+        !TRANSIENT_FILE_ERRORS.has(error.code),
+      );
+    }
+  }
+}
+function upstreamError(text) {
+  try {
+    const body = typeof text === "string" ? JSON.parse(text) : text;
+    return body?.error || body?.response?.error || null;
+  } catch {
+    return null;
+  }
+}
+export function encryptedContentRejected(status, text) {
+  if (status !== 400) return false;
+  const error = upstreamError(text);
+  const detail = `${error?.code || ""} ${error?.param || ""} ${error?.message || ""}`;
+  return /encrypted_content|encrypted content/i.test(detail);
+}
+// Drop reasoning carried over from another account. Reasoning is optional
+// context; everything the user and tools said is kept.
+export function withoutReasoning(payload) {
+  if (!Array.isArray(payload.input)) return null;
+  const input = payload.input.filter((item) => item?.type !== "reasoning");
+  if (input.length === payload.input.length) return null;
+  return { ...payload, input };
+}
+function retryDelay(failure, attempt, base = 250) {
+  const after = failure?.headers?.get?.("retry-after");
+  if (after && /^\d+(\.\d+)?$/.test(after))
+    return Math.min(10_000, Number(after) * 1000);
+  return base * 3 ** attempt;
+}
+function describeFailure(failure) {
+  if (!failure || failure.transport) return "OpenAI could not be reached";
+  if (failure.status === 200) return "The response failed before any output";
+  if (failure.status === 429) return "OpenAI throttled the request";
+  return `OpenAI returned HTTP ${failure.status}`;
+}
 
 export function accountPolicy(account, now = Date.now()) {
   const windows = Object.values(account.usage || {}).filter(
@@ -118,13 +239,7 @@ function safeEqual(a, b) {
   return left.length === right.length && timingSafeEqual(left, right);
 }
 function classify(body) {
-  let obj;
-  try {
-    obj = typeof body === "string" ? JSON.parse(body) : body;
-  } catch {
-    return null;
-  }
-  const e = obj?.error || obj?.response?.error;
+  const e = upstreamError(body);
   return e && QUOTA_CODES.has(e.code || e.type) ? e : null;
 }
 function resetTime(headers, quota) {
@@ -169,6 +284,11 @@ export class Account {
     this.path = resolve(root, spec.home, "auth.json");
     this.fetcher = fetcher;
     this.blockedUntil = 0;
+    // "usage" blocks come from a usage reading; credits may still serve them.
+    // "response" blocks come from an actual upstream rejection.
+    this.blockSource = null;
+    this.transientUntil = 0;
+    this.credits = null;
     this.reason = null;
     this.refreshing = null;
     this.credentialWrites = Promise.resolve();
@@ -206,31 +326,28 @@ export class Account {
     this.benefits = new AccountBenefits(this, root, atomicJson);
   }
   async load() {
-    let data;
-    try {
-      data = JSON.parse(
-        (await readFile(this.path, "utf8")).replace(/^\uFEFF/, ""),
-      );
-    } catch {
-      throw new Error("Sign in to this router account first.");
-    }
+    const data = await readCredentials(this.path);
     const t = data.tokens;
     if (
       ![t?.access_token, t?.account_id, t?.refresh_token].every(
         (value) => typeof value === "string" && value.length > 0,
       )
     ) {
-      throw new Error("A ChatGPT login with refresh credentials is required.");
+      throw new AuthError(
+        "A ChatGPT login with refresh credentials is required.",
+        true,
+      );
     }
     const claimedId = claims(t.access_token)["https://api.openai.com/auth"]
       ?.chatgpt_account_id;
     if (claimedId && claimedId !== t.account_id)
-      throw new Error("Token identity did not match this account.");
+      throw new AuthError("Token identity did not match this account.", true);
     const fingerprint = identityHash(t.account_id);
     if (this.accountIdentity && this.accountIdentity !== fingerprint) {
       this.reason = "identity-changed";
-      throw new Error(
+      throw new AuthError(
         "Account identity changed. Restore the original sign-in for this account slot.",
+        true,
       );
     }
     this.accountIdentity = fingerprint;
@@ -257,9 +374,16 @@ export class Account {
     if (rejectedToken && data.tokens.access_token !== rejectedToken)
       return data.tokens;
     if (!force && (!expiry || expiry > Date.now() + 60_000)) return data.tokens;
-    this.refreshing = this.refresh(data).finally(() => {
-      this.refreshing = null;
-    });
+    this.refreshing = this.refresh(data)
+      .catch((error) => {
+        // A temporary refresh failure must not stop a token that still works.
+        if (!force && !error.permanent && expiry && expiry > Date.now() + 5_000)
+          return data.tokens;
+        throw error;
+      })
+      .finally(() => {
+        this.refreshing = null;
+      });
     return this.refreshing;
   }
   writeCredentials(work) {
@@ -308,24 +432,50 @@ export class Account {
     });
   }
   async refreshCredentials(data) {
-    const r = await this.fetcher(TOKEN_ENDPOINT, {
-      method: "POST",
-      redirect: "error",
-      signal: AbortSignal.timeout(30_000),
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        client_id: CLIENT_ID,
-        grant_type: "refresh_token",
-        refresh_token: data.tokens.refresh_token,
-      }),
-    });
-    if (!r.ok) {
-      await r.body?.cancel();
-      throw new Error("Account sign-in needs renewal.");
+    let r;
+    try {
+      r = await this.fetcher(TOKEN_ENDPOINT, {
+        method: "POST",
+        redirect: "error",
+        signal: AbortSignal.timeout(30_000),
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          client_id: CLIENT_ID,
+          grant_type: "refresh_token",
+          refresh_token: data.tokens.refresh_token,
+        }),
+      });
+    } catch {
+      throw new AuthError("Sign-in service could not be reached.", false);
     }
-    const updated = await r.json();
-    if (typeof updated.access_token !== "string" || !updated.access_token)
-      throw new Error("Token refresh did not return an access token.");
+    if (!r.ok) {
+      const text = await r.text().catch(() => "");
+      // Same rule as Codex: only an explicit rejection means signing in again.
+      const error = upstreamError(text);
+      const code = String(
+        (typeof error === "string" ? error : error?.code) || "",
+      ).toLowerCase();
+      const permanent =
+        r.status === 401 ||
+        (r.status === 400 && code === "invalid_grant") ||
+        [
+          "refresh_token_expired",
+          "refresh_token_reused",
+          "refresh_token_invalidated",
+        ].includes(code);
+      throw new AuthError(
+        permanent
+          ? "Account sign-in needs renewal."
+          : `Sign-in service returned HTTP ${r.status}.`,
+        permanent,
+      );
+    }
+    const updated = await r.json().catch(() => null);
+    if (typeof updated?.access_token !== "string" || !updated.access_token)
+      throw new AuthError(
+        "Token refresh did not return an access token.",
+        false,
+      );
     const authClaims = claims(updated.access_token)[
       "https://api.openai.com/auth"
     ];
@@ -333,7 +483,7 @@ export class Account {
       authClaims?.chatgpt_account_id &&
       authClaims.chatgpt_account_id !== data.tokens.account_id
     ) {
-      throw new Error("Refreshed account identity did not match.");
+      throw new AuthError("Refreshed account identity did not match.", true);
     }
     data.tokens.access_token = updated.access_token;
     if (updated.refresh_token)
@@ -346,6 +496,18 @@ export class Account {
   }
   observe(headers) {
     let changed = false;
+    const hasCredits = headers.get("x-codex-credits-has-credits");
+    if (hasCredits !== null) {
+      const balance = headers.get("x-codex-credits-balance");
+      this.credits = {
+        ...this.credits,
+        hasCredits: /^true$/i.test(hasCredits),
+        unlimited: /^true$/i.test(
+          headers.get("x-codex-credits-unlimited") || "",
+        ),
+        balance: balance === null ? (this.credits?.balance ?? null) : balance,
+      };
+    }
     for (const side of ["primary", "secondary"]) {
       const value = headers.get(`x-codex-${side}-used-percent`);
       if (
@@ -462,6 +624,9 @@ export class Account {
         ? {
             balance: data.credits.balance ?? null,
             unlimited: data.credits.unlimited === true,
+            hasCredits: data.credits.has_credits === true,
+            overageLimitReached: data.credits.overage_limit_reached === true,
+            spendControlReached: data.spend_control?.reached === true,
           }
         : null;
       this.resetsAvailable =
@@ -472,14 +637,20 @@ export class Account {
         this.usageUpdatedAt = Date.now();
         this.usageSource = "Account usage";
         if (data.rate_limit?.limit_reached === true)
-          this.block(new Headers(), {
-            resets_at: Math.max(
-              0,
-              ...Object.values(usage)
-                .filter((w) => w.usedPercent >= 100)
-                .map((w) => w.resetsAt || 0),
-            ),
-          });
+          this.block(
+            new Headers(),
+            {
+              resets_at: Math.max(
+                0,
+                ...Object.values(usage)
+                  .filter((w) => w.usedPercent >= 100)
+                  .map((w) => w.resetsAt || 0),
+              ),
+            },
+            this.blockSource === "response" && this.blockedUntil > Date.now()
+              ? "response"
+              : "usage",
+          );
         else if (
           data.rate_limit?.allowed === true &&
           !accountPolicy(this).atThreshold &&
@@ -502,10 +673,29 @@ export class Account {
       return false;
     }
   }
-  block(headers, quota) {
+  block(headers, quota, source = "response") {
     this.blockedUntil = resetTime(headers, quota);
+    this.blockSource = source;
     this.reason = "allowance-exhausted";
     this.onUsageChange?.();
+  }
+  // A temporary failure (network, sign-in service, locked file) pauses the
+  // account briefly instead of asking for a new sign-in.
+  pauseTransient(ms = TRANSIENT_PAUSE_MS) {
+    this.transientUntil = Date.now() + ms;
+    this.onUsageChange?.();
+  }
+  // Credits keep serving an account after its plan allowance is used, until
+  // OpenAI rejects a request or reports the overage limit.
+  creditsUsable(now = Date.now()) {
+    const c = this.credits;
+    return (
+      !!c &&
+      (c.unlimited || c.hasCredits) &&
+      !c.overageLimitReached &&
+      !c.spendControlReached &&
+      (this.blockedUntil <= now || this.blockSource === "usage")
+    );
   }
 }
 
@@ -522,6 +712,9 @@ export async function createRouter(
     connectionRunner,
     idleTimeoutMs = 300_000,
     recurringPollMs,
+    retryBaseMs = 250,
+    preambleHoldMs = PREAMBLE_HOLD_MS,
+    transientPauseMs = TRANSIENT_PAUSE_MS,
   } = {},
 ) {
   if (!key || key.length < 24)
@@ -534,6 +727,13 @@ export async function createRouter(
   )
     throw new Error("Free Sol routing must be true or false.");
   config.freeSolRouting ??= true;
+  if (
+    config.creditFallback !== undefined &&
+    !CREDIT_POLICIES.has(config.creditFallback)
+  )
+    throw new Error('Credit fallback must be "last-resort" or "never".');
+  // Matches Codex without a router: credits serve once plan allowance is used.
+  config.creditFallback ??= "last-resort";
   if (!Array.isArray(config.accounts) || config.accounts.length > 20)
     throw new Error("Configure up to 20 accounts.");
   if (
@@ -621,7 +821,10 @@ export async function createRouter(
         if (old) {
           a.accountIdentity = a.accountIdentity || old.accountIdentity || null;
           a.blockedUntil = old.blockedUntil || 0;
-          a.reason = old.reason;
+          a.blockSource = old.blockSource || "response";
+          // Sign-in state is re-verified on first use; a temporary failure
+          // before a restart must not keep an account out of routing.
+          a.reason = old.reason === "sign-in-required" ? null : old.reason;
           a.usage = old.usage || {};
           a.usageUpdatedAt = old.usageUpdatedAt || null;
           a.usage = Object.fromEntries(
@@ -635,6 +838,7 @@ export async function createRouter(
           a.usageSource = old.usageSource || "Saved reading";
           a.lastUsedAt = old.lastUsedAt || null;
           a.credits = old.credits || null;
+          a.transientUntil = 0;
           a.resetsAvailable = old.resetsAvailable ?? null;
           if (Array.isArray(old.resets?.credits))
             a.benefits.details = {
@@ -672,8 +876,8 @@ export async function createRouter(
     try {
       await account.load();
       account.signedIn = true;
-    } catch {
-      account.signedIn = false;
+    } catch (error) {
+      if (error.permanent !== false) account.signedIn = false;
       continue;
     }
     if (connectedIds.has(account.accountId))
@@ -692,10 +896,30 @@ export async function createRouter(
       !drainUse?.unavailable(account) &&
       account.signedIn !== false &&
       account.blockedUntil <= Date.now() &&
+      account.transientUntil <= Date.now() &&
       !["sign-in-required", "identity-changed"].includes(account.reason) &&
       !accountPolicy(account).atThreshold &&
       !needsResetReading(account)
     );
+  }
+  // Last resort once no account has plan allowance left: an account whose
+  // credits OpenAI still accepts, in priority order.
+  function creditEligible(account) {
+    return (
+      config.creditFallback === "last-resort" &&
+      account &&
+      account.enabled &&
+      !drainUse?.unavailable(account) &&
+      account.signedIn !== false &&
+      account.transientUntil <= Date.now() &&
+      !["sign-in-required", "identity-changed"].includes(account.reason) &&
+      account.creditsUsable()
+    );
+  }
+  function creditCandidate(excluded) {
+    const order = routingOrder().filter((a) => !excluded.has(a));
+    if (order.some(eligible)) return null;
+    return order.find(creditEligible) || null;
   }
   recurring = new RecurringUse({
     accounts,
@@ -896,6 +1120,18 @@ export async function createRouter(
     }
   }
   function currentChoice(choice, payload, excluded, forceUsual) {
+    if (choice.route === "retry")
+      return (
+        choice.orderVersion === orderVersion &&
+        choice.routingVersion === routingVersion &&
+        eligible(choice.account)
+      );
+    if (choice.route === "credits")
+      return (
+        choice.orderVersion === orderVersion &&
+        choice.routingVersion === routingVersion &&
+        creditCandidate(excluded) === choice.account
+      );
     if (
       choice.version !== selectionVersion ||
       choice.orderVersion !== orderVersion ||
@@ -1094,6 +1330,22 @@ export async function createRouter(
     );
     await save();
   }
+  async function setCreditFallback(policy) {
+    if (!CREDIT_POLICIES.has(policy))
+      throw new Error('Credit fallback must be "last-resort" or "never".');
+    await commitAccounts(() => ({
+      specs: [...config.accounts],
+      items: [...accounts],
+      settings: { creditFallback: policy },
+    }));
+    record(
+      null,
+      policy === "last-resort"
+        ? "Credits enabled as a last resort after every account's plan allowance is used."
+        : "Credits disabled: requests stop when every plan allowance is used.",
+    );
+    await save();
+  }
   function snapshot() {
     const selected = accounts.find((a) => a.name === selectedAccount);
     return {
@@ -1121,6 +1373,7 @@ export async function createRouter(
             }
           : null,
       freeSol: freeSol.view(),
+      creditFallback: config.creditFallback,
       events: [...events],
       inFlight: accounts.reduce((sum, a) => sum + a.activeRequests, 0),
       accounts: accounts.map((a) => ({
@@ -1129,6 +1382,9 @@ export async function createRouter(
         label: a.label,
         profile: a.profile,
         blockedUntil: a.blockedUntil,
+        blockSource: a.blockSource,
+        transientUntil: a.transientUntil,
+        creditsUsable: creditEligible(a),
         reason: a.reason,
         drainEnabled: a.drainEnabled,
         drainStatus: drainUse?.view(a) || { phase: "off" },
@@ -1179,6 +1435,70 @@ export async function createRouter(
     refs.set(id, account);
     if (refs.size > 10_000) refs.delete(refs.keys().next().value);
   }
+  const turnStates = new Map();
+  function rememberTurnState(value, account) {
+    turnStates.delete(value);
+    turnStates.set(value, account);
+    if (turnStates.size > 5_000)
+      turnStates.delete(turnStates.keys().next().value);
+  }
+  function noteAuthFailure(account, error, authRevision) {
+    if (
+      authRevision !== account.authRevision ||
+      account.reason === "identity-changed"
+    )
+      return;
+    if (error?.permanent) {
+      account.reason = "sign-in-required";
+      record(account, "Sign-in expired or was revoked. Sign in again.");
+    } else {
+      account.pauseTransient(transientPauseMs);
+      record(
+        account,
+        "Sign-in check failed temporarily; this account is retried shortly.",
+      );
+    }
+    save();
+  }
+  function blockForQuota(account, headers, quota) {
+    account.block(headers, quota);
+    for (const other of accounts) {
+      if (other.accountId === account.accountId) {
+        other.blockedUntil = account.blockedUntil;
+        other.blockSource = account.blockSource;
+        other.reason = account.reason;
+      }
+    }
+    save();
+    record(account, "Allowance exhausted; trying the next eligible account.");
+  }
+  function served(account, choice, modelRoute) {
+    if (
+      !["free-sol", "drain", "credits"].includes(choice.route) &&
+      choice.version === selectionVersion &&
+      config.strategy === "round-robin" &&
+      !["manual", "recurring"].includes(selectionSource)
+    ) {
+      active = accounts.indexOf(account);
+      active = (active + 1) % accounts.length;
+      setSelection(accounts[active], "automatic");
+    }
+    if (choice.route !== "credits") account.reason = null;
+    account.transientUntil = 0;
+    if (selectedAccount === account.name && !eligible(account))
+      reconcileSelection().catch(() => {});
+    save();
+    record(
+      account,
+      modelRoute.fallback
+        ? `Serving ${modelRoute.effective}; desktop requested ${modelRoute.requested}.`
+        : choice.route === "free-sol"
+          ? "Serving Sol through Free-account priority."
+          : choice.route === "credits"
+            ? "Serving on credits; every account's plan allowance is used."
+            : "Serving a request on the selected account.",
+    );
+  }
   const dashboard = createDashboard({
     root,
     assetsRoot: resolve(ROOT, "dashboard"),
@@ -1197,6 +1517,7 @@ export async function createRouter(
     setDrainUse,
     resetBusy: (account) => drainUse.unavailable(account),
     setFreeSolRouting,
+    setCreditFallback,
     reconcileSelection,
     loginRunner,
     wireRunner,
@@ -1204,10 +1525,13 @@ export async function createRouter(
   });
   const server = http.createServer(async (req, res) => {
     const abort = new AbortController();
-    let idleTimer;
+    let idleTimer,
+      idled = false,
+      clientGone = false;
     const touch = () => {
       clearTimeout(idleTimer);
       idleTimer = setTimeout(() => {
+        idled = true;
         abort.abort();
         if (!req.complete) req.destroy();
       }, idleTimeoutMs);
@@ -1228,7 +1552,10 @@ export async function createRouter(
       }
     }
     res.on("close", () => {
-      if (!res.writableEnded) abort.abort();
+      if (!res.writableEnded) {
+        clientGone = true;
+        abort.abort();
+      }
     });
     try {
       const port = server.address().port;
@@ -1275,8 +1602,9 @@ export async function createRouter(
             try {
               await a.load();
               a.signedIn = true;
-            } catch {
-              a.signedIn = false;
+            } catch (error) {
+              // A briefly locked file is not a signed-out account.
+              if (error.permanent !== false) a.signedIn = false;
             }
           }),
         );
@@ -1352,10 +1680,19 @@ export async function createRouter(
       }
       let earliest = Infinity;
       let signedIn = 0;
-      const triedIdentities = new Set();
-      const excluded = new Set();
+      let waits = 0;
+      let quotaOnly = true;
+      // The most recent retryable upstream failure. If no account succeeds it is
+      // returned as-is so Codex can apply its own retry policy.
+      let lastFailure = null;
+      let reasoningStripped = false;
+      let triedIdentities = new Set();
+      let excluded = new Set();
+      // Accounts that failed temporarily for this request only. Unlike
+      // `excluded`, they never change the selection other requests use.
+      const skipped = new Set();
       let forceUsual = false;
-      for (;;) {
+      routing: for (;;) {
         if (abort.signal.aborted) throw new Error("Request cancelled.");
         if (pinned && !pinned.enabled)
           return json(
@@ -1434,23 +1771,73 @@ export async function createRouter(
             orderVersion,
             route: "usual",
           };
-        } else
+        } else {
           choice = await findRequestSelection(
             payload,
             excluded,
             abort.signal,
             forceUsual,
           );
+          if (choice.account && skipped.has(choice.account))
+            choice = {
+              account:
+                routingOrder().find(
+                  (a) =>
+                    !excluded.has(a) &&
+                    !skipped.has(a) &&
+                    eligible(a) &&
+                    !freeSol.denied(a, payload.model),
+                ) || null,
+              version: selectionVersion,
+              orderVersion,
+              routingVersion,
+              route: "retry",
+            };
+        }
+        if (!choice.account && !pinned) {
+          const credit = creditCandidate(new Set([...excluded, ...skipped]));
+          if (credit)
+            choice = {
+              account: credit,
+              version: selectionVersion,
+              orderVersion,
+              routingVersion,
+              route: "credits",
+            };
+        }
         const account = choice.account;
         if (!account) {
+          earliest = Infinity;
+          quotaOnly = true;
+          const now = Date.now();
           for (const a of accounts) {
             if (!a.enabled) continue;
             const p = accountPolicy(a);
-            if (a.blockedUntil > Date.now())
+            if (a.blockedUntil > now)
               earliest = Math.min(earliest, a.blockedUntil);
             if (p.atThreshold) earliest = Math.min(earliest, p.eligibleAfter);
             if (needsResetReading(a))
-              earliest = Math.min(earliest, Date.now() + 60_000);
+              earliest = Math.min(earliest, now + 60_000);
+            if (a.transientUntil > now) {
+              earliest = Math.min(earliest, a.transientUntil);
+              quotaOnly = false;
+            }
+          }
+          // A short pause (a temporary sign-in or network failure, a window
+          // about to reset) is waited out instead of failing the request.
+          const wait = earliest - now;
+          if (
+            !pinned &&
+            !lastFailure &&
+            waits < 2 &&
+            wait > 0 &&
+            wait <= SHORT_WAIT_MS
+          ) {
+            waits++;
+            await pause(wait + 50, abort.signal);
+            excluded = new Set();
+            triedIdentities = new Set();
+            continue;
           }
           break;
         }
@@ -1459,12 +1846,8 @@ export async function createRouter(
         let authRevision = account.authRevision;
         try {
           tokens = await account.token();
-        } catch {
-          if (
-            authRevision === account.authRevision &&
-            account.reason !== "identity-changed"
-          )
-            account.reason = "sign-in-required";
+        } catch (error) {
+          noteAuthFailure(account, error, authRevision);
           excluded.add(account);
           if (pinned) break;
           continue;
@@ -1500,253 +1883,215 @@ export async function createRouter(
           "user-agent":
             req.headers["user-agent"] || "local-codex-account-router/0.1",
         });
-        // Never carry the desktop account's cookies, actor authorization, workspace routing,
-        // or account identifiers into a different signed-in account.
-        for (const name of [
-          "openai-beta",
-          "version",
-          "session_id",
-          "conversation_id",
-        ]) {
-          if (req.headers[name]) headers.set(name, req.headers[name]);
+        // Forward Codex's routing, feature and telemetry headers. Never carry the
+        // desktop account's cookies, actor authorization or account identifiers
+        // into a different signed-in account.
+        for (const [name, value] of Object.entries(req.headers)) {
+          if (typeof value !== "string" || BLOCKED_REQUEST_HEADERS.has(name))
+            continue;
+          if (
+            FORWARDED_REQUEST_HEADERS.has(name) ||
+            name.startsWith("x-codex-") ||
+            name.startsWith("x-openai-")
+          )
+            headers.set(name, value);
         }
+        // Sticky-routing state is only valid on the account that issued it.
+        const turnState = req.headers["x-codex-turn-state"];
+        if (
+          typeof turnState === "string" &&
+          turnStates.get(turnState) === account
+        )
+          headers.set("x-codex-turn-state", turnState);
         const target = upstream + url.pathname.slice(3) + url.search;
-        const routedBody = modelRoute.fallback
-          ? Buffer.from(
-              JSON.stringify({ ...payload, model: modelRoute.effective }),
-            )
-          : body;
-        const send = () =>
-          fetcher(target, {
+        const outgoing = () => {
+          let next = modelRoute.fallback
+            ? { ...payload, model: modelRoute.effective }
+            : null;
+          if (reasoningStripped)
+            next = withoutReasoning(next || payload) || next;
+          return next ? Buffer.from(JSON.stringify(next)) : body;
+        };
+        const send = () => {
+          const data = outgoing();
+          return fetcher(target, {
             method: req.method,
             headers,
-            body: routedBody.length ? routedBody : undefined,
+            body: data.length ? data : undefined,
             redirect: "error",
             signal: abort.signal,
           });
-        let response = await send();
-        if (response.status === 401) {
-          await response.body?.cancel();
+        };
+        let renewed = false;
+        for (let attempt = 0; ;) {
+          let response = null,
+            failure = null;
           try {
-            authRevision = account.authRevision;
-            tokens = await account.token(true, tokens.access_token);
-          } catch {
-            if (authRevision === account.authRevision)
-              account.reason = "sign-in-required";
-            excluded.add(account);
-            track(null);
-            if (pinned) break;
-            continue;
+            response = await send();
+          } catch (error) {
+            if (abort.signal.aborted) throw error;
+            failure = { transport: true };
           }
-          // A transport error on the renewed request must never replay it on another account.
-          headers.set("authorization", `Bearer ${tokens.access_token}`);
-          response = await send();
-        }
-        account.observe(response.headers);
-        if (!response.ok) {
-          // Only explicit quota rejection or a Free Sol model-access rejection
-          // permits transparent fallback. Other failures pass through.
-          let text = "",
-            size = 0;
-          const errorDecoder = new TextDecoder();
-          if (response.body)
-            for await (const chunk of response.body) {
-              touch();
-              size += chunk.byteLength;
-              if (size > 1024 * 1024)
-                throw new Error("Upstream error is too large.");
-              text += errorDecoder.decode(chunk, { stream: true });
-            }
-          text += errorDecoder.decode();
-          if (
-            choice.route === "free-sol" &&
-            modelUnavailable(text, response.status)
-          ) {
-            freeSol.unavailable(account, payload.model);
-            excluded.add(account);
-            forceUsual = true;
-            record(
-              account,
-              `${payload.model} unavailable on this Free account. Falling back to the selected account; this account/model is skipped for five minutes.`,
-            );
-            save();
-            track(null);
-            if (pinned)
-              return json(
-                res,
-                409,
-                errorBody(
-                  "context_requires_full_input",
-                  "This model is unavailable on the previous response account. Send full conversation input to use usual routing.",
-                ),
-              );
-            continue;
-          }
-          const quota = response.status === 429 ? classify(text) : null;
-          if (quota) {
-            account.block(response.headers, quota);
-            for (const other of accounts) {
-              if (other.accountId === account.accountId) {
-                other.blockedUntil = account.blockedUntil;
-                other.reason = account.reason;
-              }
-            }
-            earliest = Math.min(earliest, account.blockedUntil);
-            save();
-            record(
-              account,
-              "Allowance exhausted; trying the next eligible account.",
-            );
-            if (!pinned) {
+          if (response?.status === 401 && !renewed) {
+            renewed = true;
+            await response.body?.cancel().catch(() => {});
+            try {
+              authRevision = account.authRevision;
+              tokens = await account.token(true, tokens.access_token);
+            } catch (error) {
+              noteAuthFailure(account, error, authRevision);
               excluded.add(account);
               track(null);
-              continue;
+              if (pinned) break routing;
+              continue routing;
             }
+            headers.set("authorization", `Bearer ${tokens.access_token}`);
+            continue;
           }
-          if (response.status === 401 && authRevision === account.authRevision)
-            account.reason = "sign-in-required";
-          res.writeHead(response.status, {
-            "content-type":
-              response.headers.get("content-type") || "application/json",
-            "cache-control": "no-store",
-            ...(response.headers.has("retry-after")
-              ? { "retry-after": response.headers.get("retry-after") }
-              : {}),
-          });
-          return res.end(text);
-        }
-        if (
-          choice.route !== "free-sol" &&
-          choice.route !== "drain" &&
-          choice.version === selectionVersion &&
-          config.strategy === "round-robin" &&
-          !["manual", "recurring"].includes(selectionSource)
-        ) {
-          active = accounts.indexOf(account);
-          active = (active + 1) % accounts.length;
-          setSelection(accounts[active], "automatic");
-        }
-        account.reason = null;
-        if (selectedAccount === account.name && !eligible(account))
-          reconcileSelection().catch(() => {});
-        save();
-        record(
-          account,
-          modelRoute.fallback
-            ? `Serving ${modelRoute.effective}; desktop requested ${modelRoute.requested}.`
-            : choice.route === "free-sol"
-              ? "Serving Sol through Free-account priority."
-              : "Serving a request on the selected account.",
-        );
-        const replyHeaders = {
-          "content-type":
-            response.headers.get("content-type") || "application/json",
-          "cache-control": "no-store",
-          "x-local-router-account": account.name,
-          "x-local-router-route": choice.route,
-          ...(modelRoute.effective
-            ? { "x-local-router-model": modelRoute.effective }
-            : {}),
-        };
-        // The app's own usage display belongs to its login; don't replace it with another account's usage.
-        res.writeHead(response.status, replyHeaders);
-        const isSse =
-          replyHeaders["content-type"].includes("text/event-stream");
-        let buffer = "",
-          eventData = [],
-          terminal = null;
-        const decoder = new TextDecoder();
-        function flushEvent() {
-          if (!eventData.length) return;
-          try {
-            const event = JSON.parse(eventData.join("\n"));
-            remember(event.response?.id, account);
-            if (
-              [
-                "response.completed",
-                "response.failed",
-                "response.incomplete",
-              ].includes(event.type)
-            )
-              terminal = event.type;
-            // An already-started stream is never replayed. Remember explicit
-            // access failures so the next full-input request can use usual routing.
-            if (
-              choice.route === "free-sol" &&
-              modelUnavailable(event, response.status)
-            ) {
-              freeSol.unavailable(account, payload.model);
-              record(
-                account,
-                `${payload.model} unavailable on this Free account. Future requests skip this account/model for five minutes; the current stream was not replayed.`,
-              );
-              save();
+          if (response?.ok) {
+            account.observe(response.headers);
+            const outcome = await deliver(
+              response,
+              account,
+              choice,
+              modelRoute,
+              payload,
+            );
+            if (outcome.done) return;
+            if (outcome.quota) {
+              blockForQuota(account, response.headers, outcome.quota);
+              track(null);
+              if (pinned)
+                return json(
+                  res,
+                  429,
+                  errorBody(
+                    "pinned_account_at_threshold",
+                    "This response belongs to an unavailable account. Send full conversation input to use another account.",
+                  ),
+                );
+              excluded.add(account);
+              continue routing;
             }
-            const quota = classify(event);
-            if (quota) {
-              account.block(response.headers, quota);
-              save();
+            failure = outcome.failure;
+          } else if (response) {
+            account.observe(response.headers);
+            let text;
+            try {
+              text = await errorText(response);
+            } catch (error) {
+              if (abort.signal.aborted) throw error;
+              failure = { transport: true };
             }
-          } catch {
-          } finally {
-            eventData = [];
-          }
-        }
-        function lineEvent(line) {
-          line = line.replace(/\r$/, "");
-          if (!line) flushEvent();
-          else if (line.startsWith("data:"))
-            eventData.push(line.slice(5).trimStart());
-        }
-        if (response.body)
-          for await (const chunk of response.body) {
-            touch();
-            if (isSse) {
-              buffer += decoder.decode(chunk, { stream: true });
-              let newline;
-              while ((newline = buffer.indexOf("\n")) >= 0) {
-                lineEvent(buffer.slice(0, newline));
-                buffer = buffer.slice(newline + 1);
+            if (!failure) {
+              if (
+                choice.route === "free-sol" &&
+                modelUnavailable(text, response.status)
+              ) {
+                freeSol.unavailable(account, payload.model);
+                excluded.add(account);
+                forceUsual = true;
+                record(
+                  account,
+                  `${payload.model} unavailable on this Free account. Falling back to the selected account; this account/model is skipped for five minutes.`,
+                );
+                save();
+                track(null);
+                if (pinned)
+                  return json(
+                    res,
+                    409,
+                    errorBody(
+                      "context_requires_full_input",
+                      "This model is unavailable on the previous response account. Send full conversation input to use usual routing.",
+                    ),
+                  );
+                continue routing;
+              }
+              const quota = response.status === 429 ? classify(text) : null;
+              if (quota) {
+                blockForQuota(account, response.headers, quota);
+                if (!pinned) {
+                  excluded.add(account);
+                  track(null);
+                  continue routing;
+                }
               }
               if (
-                buffer.length + eventData.reduce((n, s) => n + s.length, 0) >
-                MAX_BODY
+                !reasoningStripped &&
+                encryptedContentRejected(response.status, text) &&
+                withoutReasoning(payload)
+              ) {
+                reasoningStripped = true;
+                record(
+                  account,
+                  "Earlier reasoning from another account was rejected; resending the conversation without it.",
+                );
+                continue;
+              }
+              if (
+                response.status === 401 &&
+                authRevision === account.authRevision
               )
-                throw new Error("Upstream SSE event is too large.");
+                account.reason = "sign-in-required";
+              failure = {
+                status: response.status,
+                headers: response.headers,
+                text,
+              };
+              const retryable =
+                !quota &&
+                (RETRYABLE_STATUS.has(response.status) ||
+                  response.status === 429);
+              if (!retryable) return replyFailure(failure);
             }
-            if (!res.write(chunk))
-              await once(res, "drain", { signal: abort.signal });
           }
-        if (isSse) {
-          buffer += decoder.decode();
-          if (buffer) lineEvent(buffer);
-          flushEvent();
+          // A retryable failure before anything reached Codex: retry this
+          // account, then move to the next eligible one.
+          lastFailure = failure;
+          if (++attempt < ATTEMPTS_PER_ACCOUNT) {
+            await pause(
+              retryDelay(failure, attempt - 1, retryBaseMs),
+              abort.signal,
+            );
+            continue;
+          }
+          record(
+            account,
+            `${describeFailure(failure)} after ${ATTEMPTS_PER_ACCOUNT} attempts; trying the next eligible account.`,
+          );
+          skipped.add(account);
+          track(null);
+          if (pinned) break routing;
+          continue routing;
         }
-        record(
-          account,
-          terminal === "response.failed"
-            ? "Response failed; it was not replayed."
-            : terminal === "response.incomplete"
-              ? "Response ended incomplete."
-              : isSse && !terminal
-                ? "Stream ended without a completion event."
-                : "Response stream finished.",
-        );
-        save();
-        return res.end();
       }
       save();
+      if (lastFailure) return replyFailure(lastFailure);
       if (earliest !== Infinity) {
         res.setHeader(
           "retry-after",
           String(Math.max(1, Math.ceil((earliest - Date.now()) / 1000))),
         );
+        if (quotaOnly)
+          // Codex understands this shape and shows the reset time.
+          return json(res, 429, {
+            error: {
+              type: "usage_limit_reached",
+              code: "all_accounts_exhausted",
+              message:
+                config.creditFallback === "never"
+                  ? "Every router account has reached its usage limit, and credits are turned off in Account Router."
+                  : "Every router account has reached its usage limit.",
+              resets_at: Math.ceil(earliest / 1000),
+            },
+          });
         return json(
           res,
-          429,
+          503,
           errorBody(
-            "all_accounts_unavailable",
-            "All eligible accounts are unavailable. The router will retry accounts after their reset time.",
+            "accounts_temporarily_unavailable",
+            "Router accounts are temporarily unavailable. Retry shortly.",
           ),
         );
       }
@@ -1766,7 +2111,7 @@ export async function createRouter(
           "accounts_need_login",
           signedIn
             ? "No account can serve this request."
-            : "Sign in to the router accounts using Add-Account.ps1.",
+            : "Sign in to a router account from the Account Router dashboard.",
         ),
       );
     } catch {
@@ -1784,7 +2129,268 @@ export async function createRouter(
       clearTimeout(idleTimer);
       track(null);
     }
+    async function errorText(response) {
+      let text = "",
+        size = 0;
+      const decoder = new TextDecoder();
+      if (response.body)
+        for await (const chunk of response.body) {
+          touch();
+          size += chunk.byteLength;
+          if (size > 1024 * 1024)
+            throw new Error("Upstream error is too large.");
+          text += decoder.decode(chunk, { stream: true });
+        }
+      return text + decoder.decode();
+    }
+    function replyFailure(failure) {
+      if (failure.transport)
+        return json(
+          res,
+          502,
+          errorBody(
+            "upstream_unreachable",
+            "OpenAI could not be reached from any eligible account. Codex will retry.",
+          ),
+        );
+      res.writeHead(failure.status, {
+        "content-type":
+          failure.headers.get("content-type") || "application/json",
+        "cache-control": "no-store",
+        ...(failure.headers.has("retry-after")
+          ? { "retry-after": failure.headers.get("retry-after") }
+          : {}),
+      });
+      return res.end(failure.text);
+    }
+    // Streams the upstream reply. Returns { done } once Codex has the reply, or
+    // { failure | quota } when it failed before any model output was sent, so the
+    // request can still be retried or moved to another account.
+    async function deliver(response, account, choice, modelRoute, payload) {
+      const replyHeaders = {
+        "content-type":
+          response.headers.get("content-type") || "application/json",
+        "cache-control": "no-store",
+        "x-local-router-account": account.name,
+        "x-local-router-route": choice.route,
+        ...(modelRoute.effective
+          ? { "x-local-router-model": modelRoute.effective }
+          : {}),
+      };
+      // Usage headers stay private: the app's own usage display belongs to its login.
+      for (const name of FORWARDED_RESPONSE_HEADERS) {
+        const value = response.headers.get(name);
+        if (value !== null) replyHeaders[name] = value;
+      }
+      const issuedTurnState = response.headers.get("x-codex-turn-state");
+      if (issuedTurnState) rememberTurnState(issuedTurnState, account);
+      let committed = false;
+      const commit = () => {
+        if (committed) return;
+        committed = true;
+        served(account, choice, modelRoute);
+        res.writeHead(response.status, replyHeaders);
+      };
+      if (!replyHeaders["content-type"].includes("text/event-stream")) {
+        // JSON replies are small; reading them fully keeps a dropped
+        // connection retryable.
+        const chunks = [];
+        let size = 0;
+        try {
+          if (response.body)
+            for await (const chunk of response.body) {
+              touch();
+              size += chunk.byteLength;
+              if (size > MAX_BODY)
+                throw new Error("Upstream reply is too large.");
+              chunks.push(chunk);
+            }
+        } catch (error) {
+          if (clientGone) throw error;
+          return { failure: { transport: true } };
+        }
+        commit();
+        res.end(Buffer.concat(chunks));
+        record(account, "Response finished.");
+        save();
+        return { done: true };
+      }
+      const decoder = new TextDecoder();
+      let pending = "",
+        held = "",
+        terminal = null,
+        responseId = null,
+        stop = null;
+      const flush = () => {
+        commit();
+        if (held) res.write(held);
+        held = "";
+      };
+      // Don't keep Codex waiting for headers if the model is slow to start.
+      const holdTimer = setTimeout(() => {
+        if (!res.destroyed) flush();
+      }, preambleHoldMs);
+      holdTimer.unref();
+      const inspect = (block) => {
+        const data = block
+          .split(/\r?\n/)
+          .filter((line) => line.startsWith("data:"))
+          .map((line) => line.slice(5).trimStart());
+        let event;
+        try {
+          event = data.length ? JSON.parse(data.join("\n")) : null;
+        } catch {
+          event = null;
+        }
+        if (!event || typeof event !== "object") return "preamble";
+        if (event.response?.id) {
+          responseId = event.response.id;
+          remember(responseId, account);
+        }
+        if (
+          [
+            "response.completed",
+            "response.failed",
+            "response.incomplete",
+          ].includes(event.type)
+        )
+          terminal = event.type;
+        // An already-started stream is never replayed. Remember explicit
+        // access failures so the next full-input request can use usual routing.
+        if (
+          choice.route === "free-sol" &&
+          modelUnavailable(event, response.status)
+        ) {
+          freeSol.unavailable(account, payload.model);
+          record(
+            account,
+            `${payload.model} unavailable on this Free account. Future requests skip this account/model for five minutes; the current stream was not replayed.`,
+          );
+          save();
+          return "output";
+        }
+        const quota = classify(event);
+        if (event.type === "response.failed" && !committed) {
+          const code = event.response?.error?.code;
+          if (quota) return { quota };
+          if (!code || RETRYABLE_STREAM_CODES.has(code))
+            return { failure: block };
+          return "output";
+        }
+        if (quota) {
+          account.block(response.headers, quota);
+          save();
+        }
+        return PREAMBLE_EVENTS.has(event.type) ? "preamble" : "output";
+      };
+      // Forward whole events only, so an interruption never leaves Codex with
+      // half an event.
+      const take = () => {
+        let out = "";
+        for (;;) {
+          const boundary = /\r?\n\r?\n/.exec(pending);
+          if (!boundary) return out;
+          const block = pending.slice(0, boundary.index);
+          pending = pending.slice(boundary.index + boundary[0].length);
+          const verdict = inspect(block);
+          if (typeof verdict === "object") {
+            stop = verdict;
+            return out;
+          }
+          out += block + "\n\n";
+          if (verdict === "output" && !committed) {
+            held += out;
+            out = "";
+            flush();
+          }
+        }
+      };
+      try {
+        if (response.body)
+          for await (const chunk of response.body) {
+            touch();
+            pending += decoder.decode(chunk, { stream: true });
+            if (pending.length > MAX_BODY)
+              throw new Error("Upstream SSE event is too large.");
+            const out = take();
+            if (committed) {
+              if (out && !res.write(out))
+                await once(res, "drain", { signal: abort.signal });
+            } else held += out;
+            if (stop) break;
+          }
+        if (!stop) {
+          pending += decoder.decode();
+          if (pending.trim()) {
+            pending += "\n\n";
+            const out = take();
+            if (committed) res.write(out);
+            else held += out;
+          }
+        }
+      } catch (error) {
+        clearTimeout(holdTimer);
+        if (clientGone) throw error;
+        if (!committed && !idled) return { failure: { transport: true } };
+        // Already streaming: end with a retryable failure event instead of
+        // cutting the connection, so Codex retries the turn cleanly.
+        if (!committed) flush();
+        endWithFailure(
+          idled
+            ? "The upstream stream stopped sending data. Codex will retry this turn."
+            : "The upstream stream was interrupted. Codex will retry this turn.",
+        );
+        record(
+          account,
+          "Upstream stream was interrupted; ended it cleanly so Codex retries.",
+        );
+        save();
+        return { done: true };
+      }
+      clearTimeout(holdTimer);
+      if (stop?.quota) return { quota: stop.quota, failure: null };
+      if (stop?.failure)
+        return {
+          failure: {
+            status: response.status,
+            headers: response.headers,
+            text: held + stop.failure + "\n\n",
+          },
+        };
+      // Nothing but the response preamble arrived before the stream ended.
+      if (!committed) return { failure: { transport: true } };
+      record(
+        account,
+        terminal === "response.failed"
+          ? "Response failed; it was not replayed."
+          : terminal === "response.incomplete"
+            ? "Response ended incomplete."
+            : !terminal
+              ? "Stream ended without a completion event."
+              : "Response stream finished.",
+      );
+      save();
+      res.end();
+      return { done: true };
+      function endWithFailure(message) {
+        if (res.destroyed || res.writableEnded) return;
+        res.end(
+          `event: response.failed\ndata: ${JSON.stringify({
+            type: "response.failed",
+            response: {
+              id: responseId,
+              status: "failed",
+              error: { code: "router_upstream_interrupted", message },
+            },
+          })}\n\n`,
+        );
+      }
+    }
   });
+  // Codex keeps idle connections for about 90 seconds. Node's 5-second default
+  // closes them first, so a reused connection fails before it reaches the router.
+  server.keepAliveTimeout = 125_000;
+  server.headersTimeout = 130_000;
   // SSE is selected explicitly in the custom provider configuration.
   server.on("upgrade", (_req, socket) =>
     socket.end("HTTP/1.1 426 Upgrade Required\r\nConnection: close\r\n\r\n"),
@@ -1794,8 +2400,13 @@ export async function createRouter(
     draining = true;
     const stopDrain = drainUse.stop();
     const stopRecurring = recurring.stop();
+    // Long keep-alive connections must not hold shutdown open.
+    const sweep = setInterval(() => server.closeIdleConnections(), 100);
+    sweep.unref();
+    server.closeIdleConnections();
     drainPromise = new Promise((resolveDrain) =>
       server.close(async () => {
+        clearInterval(sweep);
         await stopRecurring;
         await stopDrain;
         await dashboard.settled();

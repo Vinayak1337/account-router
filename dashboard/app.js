@@ -54,6 +54,7 @@ const recurringSaving = new Set();
 const drainSaving = new Set();
 const enabledSaving = new Set();
 let freeSolSaving = false,
+  creditSaving = false,
   wireBusy = false,
   wireDesired = null;
 const date = (seconds) =>
@@ -333,6 +334,27 @@ async function toggleDrain(accountName) {
     await update();
   }
 }
+async function toggleCreditFallback() {
+  if (!state?.canSelect || creditSaving) return;
+  const policy = state.creditFallback === "never" ? "last-resort" : "never";
+  creditSaving = true;
+  render(state);
+  notice("");
+  try {
+    const data = await api("settings/credits", { policy });
+    creditSaving = false;
+    render(data);
+    notice(
+      policy === "last-resort"
+        ? "Credits are used only after every account's plan allowance is used."
+        : "Credits are off. Requests stop when every plan allowance is used.",
+    );
+  } catch (error) {
+    creditSaving = false;
+    notice(error.message);
+    await update();
+  }
+}
 async function toggleFreeSol() {
   if (!state?.canSelect || freeSolSaving) return;
   const enabled = !state.freeSol?.enabled;
@@ -509,6 +531,14 @@ function renderState(data) {
             `${r.model === "gpt-6-sol" ? "GPT-6 Sol" : "GPT-6.1 Sol"}: ${r.account ? name(data.accounts.find((a) => a.name === r.account)) : "selected account"}`,
         )
         .join(" · ");
+  const creditsOn = data.creditFallback !== "never";
+  $("credit-fallback").disabled = !!data.draining || creditSaving;
+  $("credit-fallback").setAttribute("aria-pressed", String(creditsOn));
+  $("credit-fallback-detail").textContent = creditSaving
+    ? "Saving…"
+    : creditsOn
+      ? "On · after every plan allowance is used, accounts with credits keep serving by priority."
+      : "Off · requests stop when every plan allowance is used.";
   if (sol?.enabled && sol.unavailable?.length)
     $("free-sol-detail").textContent +=
       " Unsupported account/model pairs are skipped for 5 minutes.";
@@ -734,6 +764,7 @@ $("switch-account").addEventListener("click", () =>
   selectForNewRequests($("switch-account-select").value),
 );
 $("free-sol-routing").addEventListener("click", toggleFreeSol);
+$("credit-fallback").addEventListener("click", toggleCreditFallback);
 $("wire-codex").addEventListener("click", wireToCodex);
 function describeReset() {
   const credit = resetCredits.find((c) => c.id === $("reset-credit").value);
@@ -919,7 +950,7 @@ async function update() {
       connectionLost = true;
       document
         .querySelectorAll(
-          "#switch-account-select,#switch-account,#wire-codex,#free-sol-routing,.select-account,.recurring-button,.drain-button,.move-button,.reset-button",
+          "#switch-account-select,#switch-account,#wire-codex,#free-sol-routing,#credit-fallback,.select-account,.recurring-button,.drain-button,.move-button,.reset-button",
         )
         .forEach((button) => {
           button.disabled = true;
